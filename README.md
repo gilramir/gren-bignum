@@ -26,9 +26,10 @@ compiles to `(a / b) | 0`, so it truncates its **result** to 32 bits:
 2147483648 // 1       --> -2147483648  -- 2^31
 ```
 
-The operands are fine at any size; it is the quotient that has to fit. So an
-`Int` is not merely imprecise above 2^53 — above 2^31 it cannot be divided at
-all.
+The operands are fine at any size; it is the **quotient** that has to fit.
+`281474976710656 // 16777216` is correct, because the answer is only 2^24. A
+division is silently wrong exactly when its result lands outside signed 32-bit
+range — including `bigNumber // 1`.
 
 ## Widths, which is the interesting part
 
