@@ -94,6 +94,49 @@ differentialSuite =
                             (\a b -> a |> BigInt.divModBy b |> Maybe.map .modulus)
                         )
                     )
+            -- The four single-answer forms are each one field of one of the
+            -- pairs above, so the only thing that can be wrong with them is
+            -- the wiring -- and the wiring is wrong invisibly, because all
+            -- four have the same type. Running them against `Int` rather than
+            -- against the pair they came from is what catches `divBy` reading
+            -- the truncating quotient, which agrees with the flooring one on
+            -- three fifths of these pairs and so survives any smaller test.
+            , U.test "quotBy is the truncating quotient" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero "//" (\a b -> Just (a // b)) (\a b -> a |> BigInt.quotBy b))
+                    )
+            , U.test "remainderBy matches Math.remainderBy" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero "rem" (\a b -> Just (Math.remainderBy b a)) (\a b -> a |> BigInt.remainderBy b))
+                    )
+            , U.test "divBy is the flooring quotient" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero "div" (\a b -> Just ((a - Math.modBy b a) // b)) (\a b -> a |> BigInt.divBy b))
+                    )
+            , U.test "modBy matches Math.modBy" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero "mod" (\a b -> Just (Math.modBy b a)) (\a b -> a |> BigInt.modBy b))
+                    )
+            -- Parity reads one bit of one limb rather than dividing, so the
+            -- way for it to be wrong is to read the wrong limb -- which every
+            -- number below 2^24 agrees with anyway. The singles here run past
+            -- the boundary for that reason: 2^24 is even and 2^24 + 1 is odd,
+            -- and a version that looked at the *top* limb would say the
+            -- opposite of both.
+            , U.test "isEven matches Int, across the limb boundary" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (parity "isEven" (\n -> Math.modBy 2 n == 0) BigInt.isEven)
+                    )
+            , U.test "isOdd is its negation everywhere" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (parity "isOdd" (\n -> Math.modBy 2 n /= 0) BigInt.isOdd)
+                    )
             , U.test "compare matches Int's" <| \_ ->
                 Task.succeed
                     (Expect.equal []
@@ -140,6 +183,19 @@ differentialSuite =
                 Task.succeed
                     (Expect.equal Nothing
                         (BigInt.fromInt 7 |> BigInt.divModBy BigInt.zero |> Maybe.map .quotient)
+                    )
+            , U.test "every single-answer division refuses zero too" <| \_ ->
+                let
+                    seven =
+                        BigInt.fromInt 7
+                in
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Nothing ]
+                        [ seven |> BigInt.quotBy BigInt.zero
+                        , seven |> BigInt.remainderBy BigInt.zero
+                        , seven |> BigInt.divBy BigInt.zero
+                        , seven |> BigInt.modBy BigInt.zero
+                        ]
                     )
             ]
         }
@@ -207,6 +263,52 @@ modest =
             ]
     in
     cross interesting interesting
+
+
+{-| Single values rather than pairs, for the predicates: everything small,
+both signs, and the limb boundaries where reading the wrong limb stops being
+invisible.
+-}
+singles : Array Int
+singles =
+    Array.flatten
+        [ Array.range -24 24
+        , [ 16777215
+          , 16777216
+          , 16777217
+          , 33554431
+          , 33554432
+          , 281474976710655
+          , 281474976710656
+          , -16777216
+          , -16777217
+          , -281474976710656
+          ]
+        ]
+
+
+parity : String -> (Int -> Bool) -> (BigInt -> Bool) -> Array String
+parity name native big =
+    singles
+        |> Array.mapAndKeepJust
+            (\n ->
+                if native n == big (BigInt.fromInt n) then
+                    Nothing
+
+                else
+                    Just
+                        (name
+                            ++ " "
+                            ++ String.fromInt n
+                            ++ " gave "
+                            ++ (if big (BigInt.fromInt n) then
+                                    "True"
+
+                                else
+                                    "False"
+                               )
+                        )
+            )
 
 
 cross : Array Int -> Array Int -> Array Pair

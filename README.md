@@ -56,7 +56,8 @@ x |> BigInt.fitsSigned 64    -- would it have overflowed?
 | | |
 |---|---|
 | arithmetic | `add` `subBy` `mul` `negate` `abs` `powBy` |
-| division | `quotRemBy` truncating, `divModBy` flooring |
+| division | `quotRemBy` truncating, `divModBy` flooring, and either half of either alone |
+| comparison | `compare` `max` `min` `isZero` `isNegative` `isEven` `isOdd` |
 | bits | `and` `or` `xor` `complement` `shiftLeftBy` `shiftRightBy` `bitLength` `popCount` |
 | widths | `maskTo` `toSigned` `fitsSigned` `fitsUnsigned` |
 | text | `fromString` `toString`, and the same with a base from 2 to 36 |
@@ -67,6 +68,18 @@ toward zero and its remainder takes the dividend's sign, which is C. `divModBy`
 floors and its modulus takes the divisor's sign, which is Python. `-7 / 2` is
 `-3` remainder `-1` in one and `-4` modulus `1` in the other. Neither is more
 correct; which you want depends on which language you are checking.
+
+Each also comes as its two halves — `quotBy` and `remainderBy`, `divBy` and
+`modBy` — because wanting only the quotient is the common case, and paying for
+it with a `Maybe.map .quotient` at every call site reads like an apology:
+
+```gren
+a |> BigInt.divBy b        -- Maybe BigInt
+a |> BigInt.quotRemBy b    -- Maybe { quotient, remainder }, when you want both
+```
+
+The pair is still the one to use when you want both, since it does the single
+division that produces them.
 
 **The bitwise operations read a value as two's complement of unbounded width**,
 so `complement (fromInt 5)` is `-6` and `and (fromInt -6) (fromInt 3)` is `2` —

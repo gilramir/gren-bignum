@@ -6,6 +6,7 @@ module BigInt exposing
     , bitLength
     , compare
     , complement
+    , divBy
     , divModBy
     , fitsSigned
     , fitsUnsigned
@@ -13,18 +14,23 @@ module BigInt exposing
     , fromInt
     , fromString
     , fromStringWithBase
+    , isEven
     , isNegative
+    , isOdd
     , isZero
     , maskTo
     , max
     , min
+    , modBy
     , mul
     , negate
     , one
     , or
     , popCount
     , powBy
+    , quotBy
     , quotRemBy
+    , remainderBy
     , shiftLeftBy
     , shiftRightBy
     , subBy
@@ -74,12 +80,21 @@ carries and can silently break.
 
 ## Arithmetic
 
-@docs add, subBy, mul, negate, abs, powBy, quotRemBy, divModBy
+@docs add, subBy, mul, negate, abs, powBy
+
+
+## Dividing
+
+Two of them, because a programmer gets asked both, and each comes in three
+forms: the pair, and either half on its own.
+
+@docs quotRemBy, quotBy, remainderBy
+@docs divModBy, divBy, modBy
 
 
 ## Comparing
 
-@docs compare, isZero, isNegative, max, min
+@docs compare, isZero, isNegative, isEven, isOdd, max, min
 
 
 ## Bits
@@ -166,13 +181,28 @@ limbBaseFloat =
 -- CONSTRUCTION
 
 
-{-| -}
+{-| Zero.
+
+Worth having by name rather than as `fromInt 0`, because it is the value the
+whole representation is normalised around: a magnitude that cancels becomes
+the empty limb array, and an empty limb array is never negative. So `zero` is
+the *only* zero there is, and `x |> subBy x == BigInt.zero` is a fair test
+rather than an accident.
+
+It is also the divisor that makes every division here `Nothing`.
+
+-}
 zero : BigInt
 zero =
     BigInt { negative = False, limbs = [] }
 
 
-{-| -}
+{-| One.
+
+The step, mostly: `x |> add one` and `x |> subBy one`. It is also what an
+empty product comes to, so `powBy 0` gives it back for any base.
+
+-}
 one : BigInt
 one =
     BigInt { negative = False, limbs = [ 1 ] }
@@ -710,8 +740,7 @@ powBy : Int -> BigInt -> BigInt
 powBy exponent base =
     if exponent < 0 then
         one
-            |> quotRemBy (powBy (Basics.negate exponent) base)
-            |> Maybe.map .quotient
+            |> quotBy (powBy (Basics.negate exponent) base)
             |> Maybe.withDefault zero
 
     else
@@ -755,6 +784,36 @@ quotRemBy (BigInt divisor) (BigInt dividend) =
             }
 
 
+{-| The quotient alone, truncating toward zero: `quotBy divisor dividend`.
+Gren's `//`, except that it is right above 2^31.
+
+    BigInt.fromInt -7 |> BigInt.quotBy (BigInt.fromInt 2)
+    --> Just (BigInt.fromInt -3)
+
+`Nothing` when the divisor is zero.
+
+-}
+quotBy : BigInt -> BigInt -> Maybe BigInt
+quotBy divisor dividend =
+    quotRemBy divisor dividend
+        |> Maybe.map .quotient
+
+
+{-| The remainder alone, taking the sign of the dividend:
+`remainderBy divisor dividend`. This is `Math.remainderBy`.
+
+    BigInt.fromInt -7 |> BigInt.remainderBy (BigInt.fromInt 2)
+    --> Just (BigInt.fromInt -1)
+
+`Nothing` when the divisor is zero.
+
+-}
+remainderBy : BigInt -> BigInt -> Maybe BigInt
+remainderBy divisor dividend =
+    quotRemBy divisor dividend
+        |> Maybe.map .remainder
+
+
 {-| Divide, flooring, so the modulus takes the sign of the divisor:
 `divModBy divisor dividend`. This is Python's `//` and `%`, and Gren's own
 `Math.modBy`.
@@ -779,6 +838,37 @@ divModBy divisor dividend =
                     , modulus = add answer.remainder divisor
                     }
             )
+
+
+{-| The floored quotient alone: `divBy divisor dividend`. Python's `//`.
+
+    BigInt.fromInt -7 |> BigInt.divBy (BigInt.fromInt 2)
+    --> Just (BigInt.fromInt -4)
+
+`Nothing` when the divisor is zero.
+
+-}
+divBy : BigInt -> BigInt -> Maybe BigInt
+divBy divisor dividend =
+    divModBy divisor dividend
+        |> Maybe.map .quotient
+
+
+{-| The modulus alone, taking the sign of the divisor: `modBy divisor
+dividend`. This is `Math.modBy`, and it is the one to reach for when the
+question is divisibility, because its answer is zero or has the divisor's
+sign and never the dividend's.
+
+    BigInt.fromInt -7 |> BigInt.modBy (BigInt.fromInt 2)
+    --> Just (BigInt.fromInt 1)
+
+`Nothing` when the divisor is zero.
+
+-}
+modBy : BigInt -> BigInt -> Maybe BigInt
+modBy divisor dividend =
+    divModBy divisor dividend
+        |> Maybe.map .modulus
 
 
 -- COMPARING
@@ -813,6 +903,32 @@ isZero (BigInt value) =
 isNegative : BigInt -> Bool
 isNegative (BigInt value) =
     value.negative
+
+
+{-| Whether this is a multiple of two. Zero is.
+
+Cheap, and cheaper than it looks: limbs are little-endian, so the bottom bit of
+the bottom limb is the answer, and no part of the rest of the number is read.
+Asking through a division instead -- `modBy two` -- walks every limb and
+builds a quotient nobody wanted.
+
+The sign does not come into it, because the representation is sign and
+magnitude and `-7` is odd for the same reason `7` is.
+
+-}
+isEven : BigInt -> Bool
+isEven (BigInt value) =
+    Bitwise.and 1 (limbAt 0 value.limbs) == 0
+
+
+{-| Whether this is not a multiple of two.
+
+    BigInt.isOdd (BigInt.fromInt -7) --> True
+
+-}
+isOdd : BigInt -> Bool
+isOdd value =
+    not (isEven value)
 
 
 {-| -}
