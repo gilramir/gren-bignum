@@ -683,7 +683,16 @@ correct digit current divisor =
 -- ARITHMETIC
 
 
-{-| -}
+{-| Add. There is no overflow to think about, which is the point.
+
+No `By` suffix, unlike [`subBy`](#subBy), because addition is commutative and
+so there is no subject for the pipeline to favour.
+
+Sign and magnitude means this is only sometimes an addition: when the signs
+differ it is the smaller magnitude subtracted from the larger, and the answer
+takes the sign of whichever was larger.
+
+-}
 add : BigInt -> BigInt -> BigInt
 add (BigInt a) (BigInt b) =
     if a.negative == b.negative then
@@ -708,19 +717,38 @@ subBy b a =
     add a (negate b)
 
 
-{-| -}
+{-| Multiply, exactly, however big the answer gets. Commutative, so no `By`.
+
+The sign is just whether the signs differed; the magnitudes go through long
+multiplication, a row at a time, so the cost is the product of the two
+lengths.
+
+-}
 mul : BigInt -> BigInt -> BigInt
 mul (BigInt a) (BigInt b) =
     make (a.negative /= b.negative) (magMul a.limbs b.limbs)
 
 
-{-| -}
+{-| Flip the sign. The limbs are handed through untouched: no arithmetic
+happens here at any size, only the sign changes.
+
+`negate zero` is `zero`: it goes through `make`, which refuses to hand back a
+negative zero, so there is only ever one of them.
+
+-}
 negate : BigInt -> BigInt
 negate (BigInt value) =
     make (not value.negative) value.limbs
 
 
-{-| -}
+{-| Drop the sign. Again the limbs pass through untouched.
+
+Worth saying that this one cannot fail. `abs` of the most negative value is
+the classic fixed-width bug -- there is no positive `Int.minValue` to return,
+so it comes back negative. A `BigInt` has no most negative value for that to
+happen at.
+
+-}
 abs : BigInt -> BigInt
 abs (BigInt value) =
     make False value.limbs
@@ -892,7 +920,13 @@ compare (BigInt a) (BigInt b) =
         magCompare a.limbs b.limbs
 
 
-{-| -}
+{-| Whether this is zero, which is `Array.isEmpty` on the limbs and so costs
+nothing at any size.
+
+`x == BigInt.zero` gives the same answer, because normalisation guarantees a
+single representation. This one just says what it means.
+
+-}
 isZero : BigInt -> Bool
 isZero (BigInt value) =
     Array.isEmpty value.limbs
@@ -931,7 +965,8 @@ isOdd value =
     not (isEven value)
 
 
-{-| -}
+{-| The larger of the two, standing in for `Basics.max`.
+-}
 max : BigInt -> BigInt -> BigInt
 max a b =
     if compare a b == LT then
@@ -941,7 +976,8 @@ max a b =
         a
 
 
-{-| -}
+{-| The smaller of the two, standing in for `Basics.min`.
+-}
 min : BigInt -> BigInt -> BigInt
 min a b =
     if compare a b == GT then
