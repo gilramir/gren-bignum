@@ -1,0 +1,219 @@
+module Bits exposing (bitsSuite)
+
+{-| The bitwise operations and the fixed-width views.
+
+Every expected value here was taken from a language that already answers these
+questions the way this package claims to -- Python, whose integers are also
+unbounded and whose `&`, `|`, `^` and `~` are also defined as two's complement
+of unbounded width. If `-6 & 3` is `2` there and something else here, this
+package is wrong and not merely different.
+
+The widths are the other half, and the reason any of this exists: an
+arbitrary-precision integer is not what a programmer is looking at when they
+are debugging a `uint64`. `maskTo 64` is.
+
+@docs bitsSuite
+
+-}
+
+import BigInt exposing (BigInt)
+import Expect
+import Maybe exposing (Maybe(..))
+import Task
+import Test.Runner.UnitNode as U
+
+
+{-| -}
+bitsSuite : U.Suite
+bitsSuite =
+    U.suite
+        { name = "Bits"
+        , setUpSuite = U.noSuiteFixture
+        , tearDownSuite = U.noTearDown
+        , setUp = \_ -> Task.succeed {}
+        , tearDown = U.noTearDown
+        , tests =
+            [ U.test "and, or and xor on two positives" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "8", "14", "6" ]
+                        [ text (BigInt.and (num 12) (num 10))
+                        , text (BigInt.or (num 12) (num 10))
+                        , text (BigInt.xor (num 12) (num 10))
+                        ]
+                    )
+            -- The interesting third. A negative number is an infinite run of
+            -- ones with its magnitude at the bottom, so ANDing one with a
+            -- positive can only clear bits, and ORing two negatives cannot
+            -- produce anything but a negative.
+            , U.test "a negative and a positive" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "2", "-5", "-7" ]
+                        [ text (BigInt.and (num -6) (num 3))
+                        , text (BigInt.or (num -6) (num 3))
+                        , text (BigInt.xor (num -6) (num 3))
+                        ]
+                    )
+            , U.test "a positive and a negative" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "4", "-1", "-5" ]
+                        [ text (BigInt.and (num 6) (num -3))
+                        , text (BigInt.or (num 6) (num -3))
+                        , text (BigInt.xor (num 6) (num -3))
+                        ]
+                    )
+            , U.test "two negatives" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "-8", "-1", "7" ]
+                        [ text (BigInt.and (num -6) (num -3))
+                        , text (BigInt.or (num -6) (num -3))
+                        , text (BigInt.xor (num -6) (num -3))
+                        ]
+                    )
+            , U.test "minus one is every bit set, so it changes nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "255", "-1", "-256" ]
+                        [ text (BigInt.and (num 255) (num -1))
+                        , text (BigInt.or (num 255) (num -1))
+                        , text (BigInt.xor (num 255) (num -1))
+                        ]
+                    )
+            , U.test "complement is -x - 1, in both directions" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "-6", "5", "-1" ]
+                        [ text (BigInt.complement (num 5))
+                        , text (BigInt.complement (num -6))
+                        , text (BigInt.complement (num 0))
+                        ]
+                    )
+            , U.test "bitwise operations survive past one limb" <| \_ ->
+                Task.succeed
+                    (Expect.equal "18446744073709551615"
+                        (text
+                            (BigInt.or (BigInt.one |> BigInt.shiftLeftBy 64 |> BigInt.subBy BigInt.one)
+                                (num 12345)
+                            )
+                        )
+                    )
+            , U.test "shifting left is multiplication and loses nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal "1208925819614629174706176"
+                        (text (BigInt.one |> BigInt.shiftLeftBy 80))
+                    )
+            , U.test "shifting right by more than a limb" <| \_ ->
+                Task.succeed
+                    (Expect.equal "1"
+                        (text (BigInt.one |> BigInt.shiftLeftBy 80 |> BigInt.shiftRightBy 80))
+                    )
+            -- Arithmetic, not logical: the sign survives and the result
+            -- floors. -1 shifted right is still -1, however far you shift it,
+            -- which is the thing people are surprised by and machines agree
+            -- on.
+            , U.test "a negative shift right floors rather than truncating" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "-4", "-1", "-1", "-2" ]
+                        [ text (num -7 |> BigInt.shiftRightBy 1)
+                        , text (num -1 |> BigInt.shiftRightBy 5)
+                        , text (num -8 |> BigInt.shiftRightBy 3)
+                        , text (num -9 |> BigInt.shiftRightBy 3)
+                        ]
+                    )
+            , U.test "a negative shift count goes the other way" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "4", "16" ]
+                        [ text (num 16 |> BigInt.shiftLeftBy -2)
+                        , text (num 4 |> BigInt.shiftRightBy -2)
+                        ]
+                    )
+            , U.test "bitLength counts the magnitude" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ 0, 1, 8, 32, 101 ]
+                        [ BigInt.bitLength (num 0)
+                        , BigInt.bitLength (num 1)
+                        , BigInt.bitLength (num 255)
+                        , BigInt.bitLength (hex "deadbeef")
+                        , BigInt.bitLength (BigInt.fromInt 2 |> BigInt.powBy 100)
+                        ]
+                    )
+            , U.test "popCount counts the magnitude's set bits" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ 0, 8, 24 ]
+                        [ BigInt.popCount (num 0)
+                        , BigInt.popCount (num 255)
+                        , BigInt.popCount (hex "deadbeef")
+                        ]
+                    )
+            -- The widths. This is what "arbitrary precision, but I work in
+            -- uint64" means in practice.
+            , U.test "minus one as a uint64" <| \_ ->
+                Task.succeed
+                    (Expect.equal "18446744073709551615" (text (BigInt.maskTo 64 (num -1))))
+            , U.test "all ones as an int64" <| \_ ->
+                Task.succeed
+                    (Expect.equal "-1" (text (BigInt.toSigned 64 (hex "FFFFFFFFFFFFFFFF"))))
+            , U.test "the top of the signed range, and one past it" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "9223372036854775807", "-9223372036854775808" ]
+                        [ text (BigInt.toSigned 64 (hex "7FFFFFFFFFFFFFFF"))
+                        , text (BigInt.toSigned 64 (hex "8000000000000000"))
+                        ]
+                    )
+            , U.test "masking is not truncation: it wraps, the way a register does" <| \_ ->
+                Task.succeed
+                    (Expect.equal "0"
+                        (text (BigInt.maskTo 64 (BigInt.one |> BigInt.shiftLeftBy 64)))
+                    )
+            , U.test "a uint32 view of a uint64 value" <| \_ ->
+                Task.succeed
+                    (Expect.equal "3735928559" (text (BigInt.maskTo 32 (hex "deadbeefdeadbeef"))))
+            , U.test "fitsUnsigned is about the width, not the value" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, True, False, False ]
+                        [ BigInt.fitsUnsigned 64 (hex "FFFFFFFFFFFFFFFF")
+                        , BigInt.fitsUnsigned 8 (num 255)
+                        , BigInt.fitsUnsigned 8 (num 256)
+                        , BigInt.fitsUnsigned 64 (num -1)
+                        ]
+                    )
+            , U.test "fitsSigned knows the range is lopsided" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, False, True, False ]
+                        [ BigInt.fitsSigned 8 (num 127)
+                        , BigInt.fitsSigned 8 (num 128)
+                        , BigInt.fitsSigned 8 (num -128)
+                        , BigInt.fitsSigned 8 (num -129)
+                        ]
+                    )
+            , U.test "a width of zero holds nothing but zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "yes", "no", "0" ]
+                        [ yesNo (BigInt.fitsSigned 0 (num 0))
+                        , yesNo (BigInt.fitsSigned 0 (num 1))
+                        , text (BigInt.maskTo 0 (num 255))
+                        ]
+                    )
+            ]
+        }
+
+
+num : Int -> BigInt
+num =
+    BigInt.fromInt
+
+
+hex : String -> BigInt
+hex text_ =
+    Maybe.withDefault BigInt.zero (BigInt.fromStringWithBase 16 text_)
+
+
+text : BigInt -> String
+text =
+    BigInt.toString
+
+
+yesNo : Bool -> String
+yesNo value =
+    if value then
+        "yes"
+
+    else
+        "no"

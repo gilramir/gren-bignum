@@ -1,0 +1,1258 @@
+module BigInt exposing
+    ( BigInt
+    , abs
+    , add
+    , and
+    , bitLength
+    , compare
+    , complement
+    , divModBy
+    , fitsSigned
+    , fitsUnsigned
+    , fromFloat
+    , fromInt
+    , fromString
+    , fromStringWithBase
+    , isNegative
+    , isZero
+    , maskTo
+    , max
+    , min
+    , mul
+    , negate
+    , one
+    , or
+    , popCount
+    , powBy
+    , quotRemBy
+    , shiftLeftBy
+    , shiftRightBy
+    , subBy
+    , toFloat
+    , toInt
+    , toSigned
+    , toString
+    , toStringWithBase
+    , xor
+    , zero
+    )
+
+{-| Integers that do not overflow, and the fixed-width views of them that a
+programmer actually asks for.
+
+A Gren `Int` is a double, so it is exact up to 2^53 and quietly wrong above it.
+That is fine until the day you are working out what a `uint64` did, and then it
+is the whole problem: `0xFFFFFFFFFFFFFFFF` is not representable, and what comes
+back instead is `18446744073709552000`, with nothing to say so.
+
+A `BigInt` has no width. What it has instead is a way to *ask* for one:
+
+    -- what does this look like as a uint64?
+    BigInt.maskTo 64 x
+
+    -- ...and as an int64?
+    BigInt.toSigned 64 x
+
+    -- would it have overflowed?
+    BigInt.fitsSigned 64 x
+
+so a width is a question you put to a value rather than a property the value
+carries and can silently break.
+
+@docs BigInt
+
+
+## Making them
+
+@docs zero, one, fromInt, toInt, fromFloat, toFloat
+
+
+## Reading and writing
+
+@docs fromString, toString, fromStringWithBase, toStringWithBase
+
+
+## Arithmetic
+
+@docs add, subBy, mul, negate, abs, powBy, quotRemBy, divModBy
+
+
+## Comparing
+
+@docs compare, isZero, isNegative, max, min
+
+
+## Bits
+
+@docs and, or, xor, complement, shiftLeftBy, shiftRightBy, bitLength, popCount
+
+
+## Widths
+
+@docs maskTo, toSigned, fitsSigned, fitsUnsigned
+
+
+## A note on argument order
+
+The operations where the order matters take their subject **last**, matching
+`Math.modBy`, `Math.remainderBy` and `Bitwise.shiftLeftBy`:
+
+    a |> BigInt.subBy one -- a - 1
+
+    a |> BigInt.quotRemBy two -- a / 2
+
+    a |> BigInt.shiftLeftBy 8 -- a << 8
+
+`compare` is the exception, and for the same reason: it stands in for
+`Basics.compare`, so it takes its arguments the way that one does.
+
+-}
+
+import Array exposing (Array)
+import Array.Builder as Builder
+import Bitwise
+import Char
+import Math
+import Maybe exposing (Maybe(..))
+import String
+
+
+-- THE TYPE
+
+
+{-| An integer of any size.
+
+Sign and magnitude rather than two's complement: a `Bool` for the sign, and an
+array of 24-bit limbs for the magnitude, least significant first, with no
+leading zeroes. Zero is the empty array, and is never negative.
+
+Twenty-four bits because every power-of-two base anyone formats in divides it
+evenly -- six hex digits to a limb, eight octal, twenty-four binary -- so those
+conversions are slicing rather than arithmetic. And because it leaves room to
+multiply: a limb times a limb plus a carry stays under 2^48, which a double
+still holds exactly.
+
+Two's complement does appear, in [`and`](#and) and its neighbours, which read a
+value *as if* it were two's complement of unbounded width. That is the only
+reading under which `complement 5` can be `-6` without anybody having declared
+how wide the number is.
+
+-}
+type BigInt
+    = BigInt
+        { negative : Bool
+        , limbs : Array Int
+        }
+
+
+limbBits : Int
+limbBits =
+    24
+
+
+limbBase : Int
+limbBase =
+    0x1000000
+
+
+limbBaseFloat : Float
+limbBaseFloat =
+    16777216
+
+
+-- CONSTRUCTION
+
+
+{-| -}
+zero : BigInt
+zero =
+    BigInt { negative = False, limbs = [] }
+
+
+{-| -}
+one : BigInt
+one =
+    BigInt { negative = False, limbs = [ 1 ] }
+
+
+{-| Build a value from a sign and a magnitude, normalising both: leading zero
+limbs go, and a zero magnitude is never negative. Every value in this module is
+made here, which is what keeps `==` meaningful.
+-}
+make : Bool -> Array Int -> BigInt
+make negative limbs =
+    let
+        trimmed =
+            normalize limbs
+    in
+    if Array.isEmpty trimmed then
+        zero
+
+    else
+        BigInt { negative = negative, limbs = trimmed }
+
+
+unwrap : BigInt -> Array Int
+unwrap (BigInt value) =
+    value.limbs
+
+
+{-| An ordinary `Int`. Above 2^53 an `Int` is already inexact, so this is
+faithful to the double you handed over rather than to the number you meant.
+-}
+fromInt : Int -> BigInt
+fromInt n =
+    -- Through `fromFloat` rather than by dividing the `Int` down, because
+    -- `//` cannot be trusted with a quotient this large. See the note under
+    -- MAGNITUDES.
+    Maybe.withDefault zero (fromFloat (Basics.toFloat n))
+
+
+{-| Back to an `Int`, when it fits in one exactly -- which means no larger than
+`Math.maxSafeInteger`. Anything bigger is `Nothing` rather than a number that
+is almost right.
+-}
+toInt : BigInt -> Maybe Int
+toInt value =
+    if toFloat (abs value) > Basics.toFloat Math.maxSafeInteger then
+        Nothing
+
+    else
+        Just (Math.truncate (toFloat value))
+
+
+{-| Truncate a `Float` toward zero. `NaN` and the infinities are `Nothing`;
+everything else has an exact integer part however large it is, because past a
+certain exponent a double *is* an integer.
+-}
+fromFloat : Float -> Maybe BigInt
+fromFloat f =
+    if Basics.isNaN f || Basics.isInfinite f then
+        Nothing
+
+    else
+        let
+            go value acc =
+                if value < 1 then
+                    acc
+
+                else
+                    let
+                        -- Dividing by a power of two is exact at any
+                        -- magnitude, so this loop never drops a bit the double
+                        -- still had.
+                        rest =
+                            Basics.toFloat (Math.truncate (value / limbBaseFloat))
+                    in
+                    go rest (Array.pushLast (Math.truncate (value - rest * limbBaseFloat)) acc)
+        in
+        Just (make (f < 0) (go (Math.abs f) []))
+
+
+{-| To a `Float`, rounding once it no longer fits -- which is what a `Float` is
+for. [`toInt`](#toInt) is the one that refuses.
+-}
+toFloat : BigInt -> Float
+toFloat (BigInt value) =
+    let
+        magnitude =
+            Array.foldr (\limb acc -> acc * limbBaseFloat + Basics.toFloat limb) 0 value.limbs
+    in
+    if value.negative then
+        Basics.negate magnitude
+
+    else
+        magnitude
+
+
+-- MAGNITUDES
+--
+-- Everything from here to the next banner works on bare limb arrays:
+-- little-endian, base 2^24, normalised. None of it knows about signs.
+--
+-- One platform fact governs all of it. **Gren's `//` truncates its result to
+-- 32 bits**: `(2^48) // 2` is 0, and `(2^31) // 1` is -2147483648. It is
+-- `(a / b) | 0` underneath, so what has to fit in 32 bits is the *quotient*,
+-- not the operands. Every `//` below is therefore on a quotient smaller than
+-- 2^25 by construction -- a carry out of a limb, a digit of the answer, an
+-- index -- and that is a property to preserve rather than a coincidence. Where
+-- a quotient can be large, `Math.truncate (a / b)` is the one that is right at
+-- any size.
+
+
+limbAt : Int -> Array Int -> Int
+limbAt index limbs =
+    Maybe.withDefault 0 (Array.get index limbs)
+
+
+normalize : Array Int -> Array Int
+normalize limbs =
+    when Array.popLast limbs is
+        Just popped ->
+            if popped.last == 0 then
+                normalize popped.initial
+
+            else
+                limbs
+
+        Nothing ->
+            limbs
+
+
+magCompare : Array Int -> Array Int -> Order
+magCompare a b =
+    if Array.length a /= Array.length b then
+        Basics.compare (Array.length a) (Array.length b)
+
+    else
+        let
+            go index =
+                if index < 0 then
+                    EQ
+
+                else if limbAt index a /= limbAt index b then
+                    Basics.compare (limbAt index a) (limbAt index b)
+
+                else
+                    go (index - 1)
+        in
+        go (Array.length a - 1)
+
+
+magAdd : Array Int -> Array Int -> Array Int
+magAdd a b =
+    let
+        len =
+            Basics.max (Array.length a) (Array.length b)
+
+        go index carry acc =
+            if index >= len then
+                if carry > 0 then
+                    Builder.pushLast carry acc
+
+                else
+                    acc
+
+            else
+                let
+                    sum =
+                        limbAt index a + limbAt index b + carry
+
+                    high =
+                        sum // limbBase
+                in
+                go (index + 1) high (Builder.pushLast (sum - high * limbBase) acc)
+    in
+    normalize (Builder.toArray (go 0 0 (Builder.empty (len + 1))))
+
+
+{-| `a - b`, where `a` is known to be at least `b`. Every caller checks first.
+-}
+magSub : Array Int -> Array Int -> Array Int
+magSub a b =
+    let
+        len =
+            Array.length a
+
+        go index borrow acc =
+            if index >= len then
+                acc
+
+            else
+                let
+                    diff =
+                        limbAt index a - limbAt index b - borrow
+                in
+                if diff < 0 then
+                    go (index + 1) 1 (Builder.pushLast (diff + limbBase) acc)
+
+                else
+                    go (index + 1) 0 (Builder.pushLast diff acc)
+    in
+    normalize (Builder.toArray (go 0 0 (Builder.empty len)))
+
+
+{-| One limb times a magnitude. A limb times a limb plus a carry is under 2^48,
+so every step of this is exact -- which is the property the choice of base was
+made for.
+-}
+mulByLimb : Int -> Array Int -> Array Int
+mulByLimb factor limbs =
+    if factor == 0 then
+        []
+
+    else
+        let
+            len =
+                Array.length limbs
+
+            go index carry acc =
+                if index >= len then
+                    if carry > 0 then
+                        Builder.pushLast carry acc
+
+                    else
+                        acc
+
+                else
+                    let
+                        product =
+                            limbAt index limbs * factor + carry
+
+                        high =
+                            product // limbBase
+                    in
+                    go (index + 1) high (Builder.pushLast (product - high * limbBase) acc)
+        in
+        normalize (Builder.toArray (go 0 0 (Builder.empty (len + 1))))
+
+
+{-| Multiply by `limbBase ^ count`: shifting left by whole limbs.
+-}
+shiftLimbs : Int -> Array Int -> Array Int
+shiftLimbs count limbs =
+    if Array.isEmpty limbs || count <= 0 then
+        limbs
+
+    else
+        Array.prepend (Array.repeat count 0) limbs
+
+
+{-| Long multiplication, a row at a time. Accumulating rows with `magAdd`
+instead of writing into a scratch buffer keeps this to sequential building on
+immutable arrays, and costs nothing asymptotically.
+-}
+magMul : Array Int -> Array Int -> Array Int
+magMul a b =
+    if Array.isEmpty a || Array.isEmpty b then
+        []
+
+    else
+        Array.indexedFoldl
+            (\index limb acc ->
+                if limb == 0 then
+                    acc
+
+                else
+                    magAdd acc (shiftLimbs index (mulByLimb limb a))
+            )
+            []
+            b
+
+
+{-| Divide by something that fits in a single limb. The running remainder is
+under a limb, so `remainder * limbBase + digit` is under 2^48 and the loop
+stays exact.
+-}
+magDivModLimb : Int -> Array Int -> { quotient : Array Int, remainder : Int }
+magDivModLimb divisor limbs =
+    let
+        go index remainder acc =
+            if index < 0 then
+                { quotient = normalize (Array.reverse (Builder.toArray acc))
+                , remainder = remainder
+                }
+
+            else
+                let
+                    current =
+                        remainder * limbBase + limbAt index limbs
+
+                    digit =
+                        current // divisor
+                in
+                go (index - 1) (current - digit * divisor) (Builder.pushLast digit acc)
+    in
+    go (Array.length limbs - 1) 0 (Builder.empty (Array.length limbs))
+
+
+{-| Multiply by `2 ^ count`, for a count smaller than one limb.
+-}
+magShiftLeftBits : Int -> Array Int -> Array Int
+magShiftLeftBits count limbs =
+    if count == 0 then
+        limbs
+
+    else
+        let
+            multiplier =
+                2 ^ count
+
+            len =
+                Array.length limbs
+
+            go index carry acc =
+                if index >= len then
+                    if carry > 0 then
+                        Builder.pushLast carry acc
+
+                    else
+                        acc
+
+                else
+                    let
+                        value =
+                            limbAt index limbs * multiplier + carry
+
+                        high =
+                            value // limbBase
+                    in
+                    go (index + 1) high (Builder.pushLast (value - high * limbBase) acc)
+        in
+        normalize (Builder.toArray (go 0 0 (Builder.empty (len + 1))))
+
+
+{-| Divide by `2 ^ count`, for a count smaller than one limb, dropping whatever
+falls off the bottom.
+-}
+magShiftRightBits : Int -> Array Int -> Array Int
+magShiftRightBits count limbs =
+    if count == 0 then
+        limbs
+
+    else
+        let
+            divisor =
+                2 ^ count
+
+            go index carry acc =
+                if index < 0 then
+                    normalize (Array.reverse (Builder.toArray acc))
+
+                else
+                    let
+                        value =
+                            carry * limbBase + limbAt index limbs
+
+                        digit =
+                            value // divisor
+                    in
+                    go (index - 1) (value - digit * divisor) (Builder.pushLast digit acc)
+        in
+        go (Array.length limbs - 1) 0 (Builder.empty (Array.length limbs))
+
+
+magShiftLeft : Int -> Array Int -> Array Int
+magShiftLeft count limbs =
+    shiftLimbs (count // limbBits) (magShiftLeftBits (Math.modBy limbBits count) limbs)
+
+
+magShiftRight : Int -> Array Int -> Array Int
+magShiftRight count limbs =
+    magShiftRightBits (Math.modBy limbBits count) (Array.dropFirst (count // limbBits) limbs)
+
+
+{-| How many bits one limb uses.
+-}
+limbBitLength : Int -> Int
+limbBitLength limb =
+    if limb == 0 then
+        0
+
+    else
+        1 + limbBitLength (limb // 2)
+
+
+{-| Long division: Knuth's algorithm D, written as a fold rather than as
+mutation of a scratch buffer.
+
+Both operands are shifted left until the divisor's top limb fills at least half
+of one, which is what bounds the error in the trial quotient below to two -- so
+the correction loop runs at most twice however unlucky the numbers are. Without
+that normalisation the same estimate can be arbitrarily bad and the loop that
+fixes it *becomes* the algorithm.
+
+-}
+magDivMod : Array Int -> Array Int -> { quotient : Array Int, remainder : Array Int }
+magDivMod dividend divisor =
+    if magCompare dividend divisor == LT then
+        { quotient = [], remainder = dividend }
+
+    else if Array.length divisor == 1 then
+        let
+            answer =
+                magDivModLimb (limbAt 0 divisor) dividend
+        in
+        { quotient = answer.quotient
+        , remainder =
+            if answer.remainder == 0 then
+                []
+
+            else
+                [ answer.remainder ]
+        }
+
+    else
+        let
+            shift =
+                limbBits - limbBitLength (limbAt (Array.length divisor - 1) divisor)
+
+            answer =
+                longDivide (magShiftLeftBits shift dividend) (magShiftLeftBits shift divisor)
+        in
+        { quotient = answer.quotient
+        , remainder = magShiftRightBits shift answer.remainder
+        }
+
+
+longDivide : Array Int -> Array Int -> { quotient : Array Int, remainder : Array Int }
+longDivide dividend divisor =
+    let
+        width =
+            Array.length divisor
+
+        go index remainder acc =
+            if index < 0 then
+                { quotient = normalize (Array.reverse (Builder.toArray acc))
+                , remainder = remainder
+                }
+
+            else
+                let
+                    -- The running remainder, with one more limb of the
+                    -- dividend pulled down beside it.
+                    current =
+                        magAdd (shiftLimbs 1 remainder) [ limbAt index dividend ]
+
+                    estimate =
+                        Basics.min
+                            (limbBase - 1)
+                            ((limbAt width current * limbBase + limbAt (width - 1) current)
+                                // limbAt (width - 1) divisor
+                            )
+
+                    digit =
+                        correct estimate current divisor
+                in
+                go (index - 1)
+                    (magSub current (mulByLimb digit divisor))
+                    (Builder.pushLast digit acc)
+    in
+    go (Array.length dividend - 1) [] (Builder.empty (Array.length dividend))
+
+
+{-| Walk the trial quotient down until it fits. Normalisation caps this at two
+turns; it is a loop rather than two subtractions because being wrong here would
+be silent.
+-}
+correct : Int -> Array Int -> Array Int -> Int
+correct digit current divisor =
+    if digit <= 0 then
+        0
+
+    else if magCompare (mulByLimb digit divisor) current == GT then
+        correct (digit - 1) current divisor
+
+    else
+        digit
+
+
+-- ARITHMETIC
+
+
+{-| -}
+add : BigInt -> BigInt -> BigInt
+add (BigInt a) (BigInt b) =
+    if a.negative == b.negative then
+        make a.negative (magAdd a.limbs b.limbs)
+
+    else
+        when magCompare a.limbs b.limbs is
+            LT ->
+                make b.negative (magSub b.limbs a.limbs)
+
+            _ ->
+                make a.negative (magSub a.limbs b.limbs)
+
+
+{-| Subtract the first from the second: `subBy b a` is `a - b`.
+
+    a |> BigInt.subBy one
+
+-}
+subBy : BigInt -> BigInt -> BigInt
+subBy b a =
+    add a (negate b)
+
+
+{-| -}
+mul : BigInt -> BigInt -> BigInt
+mul (BigInt a) (BigInt b) =
+    make (a.negative /= b.negative) (magMul a.limbs b.limbs)
+
+
+{-| -}
+negate : BigInt -> BigInt
+negate (BigInt value) =
+    make (not value.negative) value.limbs
+
+
+{-| -}
+abs : BigInt -> BigInt
+abs (BigInt value) =
+    make False value.limbs
+
+
+{-| Raise to a power: `powBy exponent base`.
+
+A negative exponent is neither an error nor a special case -- it is the
+truncated integer answer, which is what every other division here gives. Two to
+the minus three is an eighth, truncated to zero; one to any negative power is
+one; and zero to a negative power, the one genuinely undefined case, is zero.
+
+    BigInt.fromInt 2 |> BigInt.powBy 10 --> BigInt.fromInt 1024
+
+-}
+powBy : Int -> BigInt -> BigInt
+powBy exponent base =
+    if exponent < 0 then
+        one
+            |> quotRemBy (powBy (Basics.negate exponent) base)
+            |> Maybe.map .quotient
+            |> Maybe.withDefault zero
+
+    else
+        powLoop exponent base one
+
+
+powLoop : Int -> BigInt -> BigInt -> BigInt
+powLoop exponent base acc =
+    if exponent == 0 then
+        acc
+
+    else if Math.modBy 2 exponent == 1 then
+        powLoop (exponent - 1) base (mul acc base)
+
+    else
+        powLoop (exponent // 2) (mul base base) acc
+
+
+{-| Divide, truncating toward zero, so the remainder takes the sign of the
+dividend: `quotRemBy divisor dividend`. This is C's `/` and `%`, and Gren's own
+`//` and `Math.remainderBy`.
+
+`-7 / 2` is `-3` remainder `-1` here.
+
+`Nothing` when the divisor is zero, which is the only way it can fail.
+
+-}
+quotRemBy : BigInt -> BigInt -> Maybe { quotient : BigInt, remainder : BigInt }
+quotRemBy (BigInt divisor) (BigInt dividend) =
+    if Array.isEmpty divisor.limbs then
+        Nothing
+
+    else
+        let
+            answer =
+                magDivMod dividend.limbs divisor.limbs
+        in
+        Just
+            { quotient = make (dividend.negative /= divisor.negative) answer.quotient
+            , remainder = make dividend.negative answer.remainder
+            }
+
+
+{-| Divide, flooring, so the modulus takes the sign of the divisor:
+`divModBy divisor dividend`. This is Python's `//` and `%`, and Gren's own
+`Math.modBy`.
+
+`-7 / 2` is `-4` modulus `1` here.
+
+The two differ only when exactly one operand is negative, and which one you
+want depends on whether you are checking C or Python. Both are here because a
+calculator gets asked both.
+
+-}
+divModBy : BigInt -> BigInt -> Maybe { quotient : BigInt, modulus : BigInt }
+divModBy divisor dividend =
+    quotRemBy divisor dividend
+        |> Maybe.map
+            (\answer ->
+                if isZero answer.remainder || isNegative answer.remainder == isNegative divisor then
+                    { quotient = answer.quotient, modulus = answer.remainder }
+
+                else
+                    { quotient = answer.quotient |> subBy one
+                    , modulus = add answer.remainder divisor
+                    }
+            )
+
+
+-- COMPARING
+
+
+{-| How the first compares to the second, the way `Basics.compare` does.
+-}
+compare : BigInt -> BigInt -> Order
+compare (BigInt a) (BigInt b) =
+    if a.negative /= b.negative then
+        if a.negative then
+            LT
+
+        else
+            GT
+
+    else if a.negative then
+        magCompare b.limbs a.limbs
+
+    else
+        magCompare a.limbs b.limbs
+
+
+{-| -}
+isZero : BigInt -> Bool
+isZero (BigInt value) =
+    Array.isEmpty value.limbs
+
+
+{-| Zero is not negative.
+-}
+isNegative : BigInt -> Bool
+isNegative (BigInt value) =
+    value.negative
+
+
+{-| -}
+max : BigInt -> BigInt -> BigInt
+max a b =
+    if compare a b == LT then
+        b
+
+    else
+        a
+
+
+{-| -}
+min : BigInt -> BigInt -> BigInt
+min a b =
+    if compare a b == GT then
+        b
+
+    else
+        a
+
+
+-- BITS
+--
+-- These read a value as two's complement of unbounded width: a negative number
+-- is an infinite run of one bits with its magnitude at the bottom. It is the
+-- only reading under which `complement 5 == -6` without anybody having said
+-- how wide the number is.
+
+
+{-| The two's complement limbs of a value, in a field `width` limbs wide. A
+positive number is itself; a negative one is `limbBase ^ width - |x|`, which is
+the arithmetic a machine does.
+-}
+twosComplement : Int -> BigInt -> Array Int
+twosComplement width (BigInt value) =
+    let
+        pattern =
+            if value.negative then
+                magSub (powerOfLimbBase width) value.limbs
+
+            else
+                value.limbs
+    in
+    Array.initialize width 0 (\index -> limbAt index pattern)
+
+
+powerOfLimbBase : Int -> Array Int
+powerOfLimbBase width =
+    Array.pushLast 1 (Array.repeat width 0)
+
+
+bitwise : (Bool -> Bool -> Bool) -> (Int -> Int -> Int) -> BigInt -> BigInt -> BigInt
+bitwise signOp limbOp a b =
+    let
+        -- One limb wider than either operand, so the sign has somewhere to
+        -- live: two negatives ANDed together are still negative, and the
+        -- result has to have room to say so.
+        width =
+            1 + Basics.max (Array.length (unwrap a)) (Array.length (unwrap b))
+
+        result =
+            Array.map2 limbOp (twosComplement width a) (twosComplement width b)
+    in
+    if signOp (isNegative a) (isNegative b) then
+        make True (magSub (powerOfLimbBase width) (normalize result))
+
+    else
+        make False result
+
+
+{-| Bitwise AND.
+-}
+and : BigInt -> BigInt -> BigInt
+and =
+    bitwise (&&) Bitwise.and
+
+
+{-| Bitwise OR.
+-}
+or : BigInt -> BigInt -> BigInt
+or =
+    bitwise (||) Bitwise.or
+
+
+{-| Bitwise XOR.
+-}
+xor : BigInt -> BigInt -> BigInt
+xor =
+    bitwise Basics.xor Bitwise.xor
+
+
+{-| Flip every bit, which for a number with no width is exactly `-x - 1`.
+
+    BigInt.complement (BigInt.fromInt 5) --> BigInt.fromInt -6
+
+-}
+complement : BigInt -> BigInt
+complement value =
+    negate (add value one)
+
+
+{-| Shift left, which is multiplication by a power of two and never loses
+anything. A negative count shifts the other way.
+-}
+shiftLeftBy : Int -> BigInt -> BigInt
+shiftLeftBy count (BigInt value) =
+    if count < 0 then
+        shiftRightBy (Basics.negate count) (BigInt value)
+
+    else
+        make value.negative (magShiftLeft count value.limbs)
+
+
+{-| Shift right *arithmetically*: the sign is kept and the result is floored,
+so `-1` shifted right stays `-1` rather than becoming `0`. That is what a
+machine's arithmetic shift does and what two's complement means. The truncating
+version is [`quotRemBy`](#quotRemBy) with a power of two.
+-}
+shiftRightBy : Int -> BigInt -> BigInt
+shiftRightBy count (BigInt value) =
+    if count < 0 then
+        shiftLeftBy (Basics.negate count) (BigInt value)
+
+    else
+        let
+            shifted =
+                magShiftRight count value.limbs
+        in
+        if value.negative && magCompare (magShiftLeft count shifted) value.limbs /= EQ then
+            -- Flooring a negative number rounds away from zero, so anything
+            -- that fell off the bottom costs one.
+            make True (magAdd shifted [ 1 ])
+
+        else
+            make value.negative shifted
+
+
+{-| How many bits the magnitude needs; zero for zero. The sign is not counted,
+because a `BigInt` has no width for a sign bit to live in.
+
+    BigInt.fromInt 255 |> BigInt.bitLength --> 8
+
+-}
+bitLength : BigInt -> Int
+bitLength (BigInt value) =
+    when Array.popLast value.limbs is
+        Just popped ->
+            Array.length popped.initial * limbBits + limbBitLength popped.last
+
+        Nothing ->
+            0
+
+
+{-| How many bits of the *magnitude* are set. Counting a negative number's bits
+would mean counting an infinite run of ones, so this counts the magnitude's and
+says so; [`maskTo`](#maskTo) first if that is not what you meant.
+-}
+popCount : BigInt -> Int
+popCount (BigInt value) =
+    Array.foldl (\limb acc -> acc + limbPopCount limb) 0 value.limbs
+
+
+limbPopCount : Int -> Int
+limbPopCount limb =
+    if limb == 0 then
+        0
+
+    else
+        Math.modBy 2 limb + limbPopCount (limb // 2)
+
+
+-- WIDTHS
+
+
+{-| The low `width` bits, as a number that is never negative -- which is what
+reading a value as an unsigned integer of that width means.
+
+    BigInt.fromInt -1 |> BigInt.maskTo 64 |> BigInt.toString
+        --> "18446744073709551615"
+
+-}
+maskTo : Int -> BigInt -> BigInt
+maskTo width value =
+    if width <= 0 then
+        zero
+
+    else
+        value
+            |> divModBy (powerOfTwo width)
+            |> Maybe.map .modulus
+            |> Maybe.withDefault zero
+
+
+{-| The low `width` bits read as two's complement -- which is what reading a
+value as a signed integer of that width means.
+
+    BigInt.fromString "0xFFFFFFFFFFFFFFFF"
+        |> Maybe.map (BigInt.toSigned 64)
+        --> Just (BigInt.fromInt -1)
+
+-}
+toSigned : Int -> BigInt -> BigInt
+toSigned width value =
+    if width <= 0 then
+        zero
+
+    else
+        let
+            masked =
+                maskTo width value
+        in
+        if compare masked (powerOfTwo (width - 1)) == LT then
+            masked
+
+        else
+            masked |> subBy (powerOfTwo width)
+
+
+{-| Would this survive being stored in a signed integer of this width -- is it
+within `-2^(width-1)` to `2^(width-1) - 1`?
+-}
+fitsSigned : Int -> BigInt -> Bool
+fitsSigned width value =
+    if width <= 0 then
+        isZero value
+
+    else if isNegative value then
+        compare (abs value) (powerOfTwo (width - 1)) /= GT
+
+    else
+        compare value (powerOfTwo (width - 1)) == LT
+
+
+{-| Would this survive being stored in an unsigned integer of this width?
+-}
+fitsUnsigned : Int -> BigInt -> Bool
+fitsUnsigned width value =
+    not (isNegative value) && bitLength value <= width
+
+
+powerOfTwo : Int -> BigInt
+powerOfTwo exponent =
+    shiftLeftBy exponent one
+
+
+-- READING
+
+
+{-| Read a number written the way it would be in source: an optional sign, then
+`0x`, `0b` or `0o` and its digits, or plain decimal.
+
+Underscores are ignored wherever they fall, so `0xdead_beef` and `1_000_000`
+both parse.
+
+    BigInt.fromString "0b1010" --> Just (BigInt.fromInt 10)
+
+    BigInt.fromString "-0xff" --> Just (BigInt.fromInt -255)
+
+    BigInt.fromString "12 apples" --> Nothing
+
+-}
+fromString : String -> Maybe BigInt
+fromString text =
+    let
+        parse negative body =
+            if String.startsWith "0x" body || String.startsWith "0X" body then
+                digits 16 negative (String.dropFirst 2 body)
+
+            else if String.startsWith "0b" body || String.startsWith "0B" body then
+                digits 2 negative (String.dropFirst 2 body)
+
+            else if String.startsWith "0o" body || String.startsWith "0O" body then
+                digits 8 negative (String.dropFirst 2 body)
+
+            else
+                digits 10 negative body
+    in
+    withSign parse (String.replace "_" "" text)
+
+
+{-| Read a number in a base from 2 to 36, with an optional sign and no prefix.
+Underscores are ignored here too.
+-}
+fromStringWithBase : Int -> String -> Maybe BigInt
+fromStringWithBase base text =
+    withSign (\negative body -> digits base negative body) (String.replace "_" "" text)
+
+
+withSign : (Bool -> String -> Maybe BigInt) -> String -> Maybe BigInt
+withSign parse text =
+    if String.startsWith "-" text then
+        parse True (String.dropFirst 1 text)
+
+    else if String.startsWith "+" text then
+        parse False (String.dropFirst 1 text)
+
+    else
+        parse False text
+
+
+digits : Int -> Bool -> String -> Maybe BigInt
+digits base negative body =
+    if base < 2 || base > 36 || String.isEmpty body then
+        Nothing
+
+    else
+        let
+            radix =
+                fromInt base
+
+            step char acc =
+                when acc is
+                    Nothing ->
+                        Nothing
+
+                    Just total ->
+                        when digitValue char is
+                            Nothing ->
+                                Nothing
+
+                            Just digit ->
+                                if digit >= base then
+                                    Nothing
+
+                                else
+                                    Just (add (mul total radix) (fromInt digit))
+        in
+        String.foldl step (Just zero) body
+            |> Maybe.map
+                (\value ->
+                    if negative then
+                        negate value
+
+                    else
+                        value
+                )
+
+
+digitValue : Char -> Maybe Int
+digitValue char =
+    let
+        code =
+            Char.toCode char
+    in
+    if code >= 0x30 && code <= 0x39 then
+        Just (code - 0x30)
+
+    else if code >= 0x61 && code <= 0x7A then
+        Just (code - 0x61 + 10)
+
+    else if code >= 0x41 && code <= 0x5A then
+        Just (code - 0x41 + 10)
+
+    else
+        Nothing
+
+
+-- WRITING
+
+
+{-| Decimal, with a leading `-` when negative.
+-}
+toString : BigInt -> String
+toString value =
+    toStringWithBase 10 value
+
+
+{-| In a base from 2 to 36, with digits `0`-`9` then `a`-`z`, and a leading `-`
+when negative. No prefix: `toStringWithBase 16` gives `"ff"`, not `"0xff"`.
+
+A negative number is written with a sign rather than as two's complement, so
+`toStringWithBase 16 (fromInt -255)` is `"-ff"`. For the machine's rendering of
+a 64-bit value, [`maskTo`](#maskTo) first -- which is the whole reason that
+function exists.
+
+Anything outside 2 to 36 gives `""`.
+
+-}
+toStringWithBase : Int -> BigInt -> String
+toStringWithBase base value =
+    if base < 2 || base > 36 then
+        ""
+
+    else if isZero value then
+        "0"
+
+    else
+        let
+            -- The largest power of the base that still fits in one limb, so
+            -- the number is consumed a chunk at a time rather than a digit at
+            -- a time.
+            chunk =
+                largestPower base 1 0
+
+            body =
+                chunks chunk.value chunk.digits base (unwrap (abs value)) []
+        in
+        if isNegative value then
+            "-" ++ body
+
+        else
+            body
+
+
+largestPower : Int -> Int -> Int -> { value : Int, digits : Int }
+largestPower base value count =
+    if value * base >= limbBase then
+        { value = value, digits = count }
+
+    else
+        largestPower base (value * base) (count + 1)
+
+
+chunks : Int -> Int -> Int -> Array Int -> Array String -> String
+chunks divisor width base limbs acc =
+    let
+        answer =
+            magDivModLimb divisor limbs
+
+        text =
+            limbToString base answer.remainder
+    in
+    if Array.isEmpty answer.quotient then
+        String.join "" (Array.pushFirst text acc)
+
+    else
+        chunks divisor
+            width
+            base
+            answer.quotient
+            (Array.pushFirst (String.padLeft width '0' text) acc)
+
+
+limbToString : Int -> Int -> String
+limbToString base value =
+    if value < base then
+        digitChar value
+
+    else
+        limbToString base (value // base) ++ digitChar (Math.modBy base value)
+
+
+digitChar : Int -> String
+digitChar value =
+    String.slice value (value + 1) "0123456789abcdefghijklmnopqrstuvwxyz"

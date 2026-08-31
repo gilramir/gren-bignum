@@ -1,0 +1,15 @@
+{
+    "type": "package",
+    "platform": "common",
+    "name": "gilramir/gren-bigint",
+    "summary": "Arbitrary-precision integers, with the fixed-width views a programmer asks for",
+    "license": "BSD-3-Clause",
+    "version": "1.0.0",
+    "exposed-modules": [
+        "BigInt"
+    ],
+    "gren-version": "0.6.0 <= v < 0.7.0",
+    "dependencies": {
+        "gren-lang/core": "7.4.2 <= v < 8.0.0"
+    }
+}

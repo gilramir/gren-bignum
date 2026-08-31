@@ -1,0 +1,173 @@
+module BigNumbers exposing (bigNumbersSuite)
+
+{-| The half that a differential test cannot reach.
+
+`Differential` checks `BigInt` against Gren's `Int`, which means it can only
+check answers an `Int` can hold. Everything here is past 2^53, where the point
+of the package is, and the expected values were produced elsewhere -- an
+independent implementation, which is the only honest source for "what should
+this be".
+
+@docs bigNumbersSuite
+
+-}
+
+import BigInt exposing (BigInt)
+import Expect
+import Maybe exposing (Maybe(..))
+import Task
+import Test.Runner.UnitNode as U
+
+
+{-| -}
+bigNumbersSuite : U.Suite
+bigNumbersSuite =
+    U.suite
+        { name = "BigNumbers"
+        , setUpSuite = U.noSuiteFixture
+        , tearDownSuite = U.noTearDown
+        , setUp = \_ -> Task.succeed {}
+        , tearDown = U.noTearDown
+        , tests =
+            [ -- The number this package exists for. An Int gives
+              -- 18446744073709552000, and says nothing about the four digits
+              -- it lost.
+              U.test "2^64 - 1 is exact" <| \_ ->
+                Task.succeed
+                    (Expect.equal "18446744073709551615"
+                        (BigInt.toString (BigInt.one |> BigInt.shiftLeftBy 64 |> BigInt.subBy BigInt.one))
+                    )
+            , U.test "and an Int cannot hold it" <| \_ ->
+                Task.succeed
+                    (Expect.equal Nothing
+                        (BigInt.toInt (BigInt.one |> BigInt.shiftLeftBy 64))
+                    )
+            , U.test "25 factorial" <| \_ ->
+                Task.succeed (Expect.equal "15511210043330985984000000" (BigInt.toString (factorial 25)))
+            , U.test "30 factorial" <| \_ ->
+                Task.succeed (Expect.equal "265252859812191058636308480000000" (BigInt.toString (factorial 30)))
+            , U.test "a product of two twenty-digit numbers" <| \_ ->
+                Task.succeed
+                    (Expect.equal "1219326311370217952237463801111263526900"
+                        (BigInt.toString
+                            (BigInt.mul (bigFromString "12345678901234567890")
+                                (bigFromString "98765432109876543210")
+                            )
+                        )
+                    )
+            , U.test "2 to the hundredth" <| \_ ->
+                Task.succeed
+                    (Expect.equal "1267650600228229401496703205376"
+                        (BigInt.toString (BigInt.fromInt 2 |> BigInt.powBy 100))
+                    )
+            -- Multi-limb division: the one operation whose trial quotient can
+            -- be wrong and whose correction step is the only thing that fixes
+            -- it. 2^128 over 3^40 needs several corrections along the way.
+            , U.test "2^128 divided by 3^40, quotient" <| \_ ->
+                Task.succeed
+                    (Expect.equal "27989120778730014269"
+                        (BigInt.toString (part .quotient (divide (power 2 128) (power 3 40))))
+                    )
+            , U.test "...and remainder" <| \_ ->
+                Task.succeed
+                    (Expect.equal "11598886945721149987"
+                        (BigInt.toString (part .remainder (divide (power 2 128) (power 3 40))))
+                    )
+            , U.test "division undoes multiplication exactly" <| \_ ->
+                Task.succeed
+                    (Expect.equal "0"
+                        (BigInt.toString
+                            (part .remainder (divide (BigInt.mul (factorial 30) (power 7 33)) (power 7 33)))
+                        )
+                    )
+            , U.test "and gives back the other factor" <| \_ ->
+                Task.succeed
+                    (Expect.equal (BigInt.toString (factorial 30))
+                        (BigInt.toString
+                            (part .quotient (divide (BigInt.mul (factorial 30) (power 7 33)) (power 7 33)))
+                        )
+                    )
+            -- A remainder must always be smaller than the divisor. Getting the
+            -- trial quotient one too low leaves a remainder that is not, and
+            -- nothing else in the suite would notice.
+            , U.test "every remainder is smaller than its divisor" <| \_ ->
+                Task.succeed
+                    (Expect.equal True
+                        (BigInt.compare
+                            (part .remainder (divide (power 2 128) (power 3 40)))
+                            (power 3 40)
+                            == LT
+                        )
+                    )
+            , U.test "a Float too big for an Int survives the trip" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "1000000000000000019884624838656")
+                        (Maybe.map BigInt.toString (BigInt.fromFloat 1.0e30))
+                    )
+            , U.test "which is the double, not the decimal -- and that is the point" <| \_ ->
+                Task.succeed
+                    (Expect.equal True
+                        (BigInt.compare (bigFromString "1000000000000000019884624838656")
+                            (bigFromString "1000000000000000000000000000000")
+                            == GT
+                        )
+                    )
+            , U.test "NaN is not a number" <| \_ ->
+                Task.succeed (Expect.equal Nothing (BigInt.fromFloat (0 / 0)))
+            , U.test "nor is infinity" <| \_ ->
+                Task.succeed (Expect.equal Nothing (BigInt.fromFloat (1 / 0)))
+            , U.test "toFloat rounds instead of refusing" <| \_ ->
+                Task.succeed
+                    (Expect.equal 1.8446744073709552e19
+                        (BigInt.toFloat (BigInt.one |> BigInt.shiftLeftBy 64 |> BigInt.subBy BigInt.one))
+                    )
+            , U.test "a negative exponent truncates rather than failing" <| \_ ->
+                Task.succeed (Expect.equal "0" (BigInt.toString (BigInt.fromInt 2 |> BigInt.powBy -3)))
+            , U.test "one to a negative power is still one" <| \_ ->
+                Task.succeed (Expect.equal "1" (BigInt.toString (BigInt.one |> BigInt.powBy -3)))
+            , U.test "and zero to a negative power is zero" <| \_ ->
+                Task.succeed (Expect.equal "0" (BigInt.toString (BigInt.zero |> BigInt.powBy -3)))
+            , U.test "anything to the zeroth is one" <| \_ ->
+                Task.succeed (Expect.equal "1" (BigInt.toString (factorial 30 |> BigInt.powBy 0)))
+            ]
+        }
+
+
+factorial : Int -> BigInt
+factorial n =
+    if n <= 1 then
+        BigInt.one
+
+    else
+        BigInt.mul (BigInt.fromInt n) (factorial (n - 1))
+
+
+power : Int -> Int -> BigInt
+power base exponent =
+    BigInt.fromInt base |> BigInt.powBy exponent
+
+
+divide : BigInt -> BigInt -> Maybe { quotient : BigInt, remainder : BigInt }
+divide dividend divisor =
+    dividend |> BigInt.quotRemBy divisor
+
+
+{-| Pull one side out of a division that cannot have failed, so the tests read
+as arithmetic rather than as `Maybe` plumbing.
+-}
+part :
+    ({ quotient : BigInt, remainder : BigInt } -> BigInt)
+    -> Maybe { quotient : BigInt, remainder : BigInt }
+    -> BigInt
+part field answer =
+    when answer is
+        Just it ->
+            field it
+
+        Nothing ->
+            BigInt.zero
+
+
+bigFromString : String -> BigInt
+bigFromString text =
+    Maybe.withDefault BigInt.zero (BigInt.fromString text)

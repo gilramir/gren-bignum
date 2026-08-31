@@ -1,0 +1,39 @@
+module Main exposing (main)
+
+{-| The test suite.
+
+Four kinds of test, in the order they catch things:
+
+  - `Differential` runs every operation twice, once through `BigInt` and once
+    through Gren's own `Int`, over every small pair and over pairs straddling
+    the 2^24 limb boundary. Anything an `Int` can check, it checks.
+  - `BigNumbers` picks up where that stops -- past 2^53, where the point of the
+    package is, against values produced by an independent implementation.
+  - `Bits` covers the two's-complement reading of negative numbers and the
+    fixed-width views, against what Python gives for the same expressions.
+  - `Strings` covers parsing and formatting, including the refusals.
+
+Run with `./run.sh`.
+
+-}
+
+import BigNumbers exposing (bigNumbersSuite)
+import Bits exposing (bitsSuite)
+import Differential exposing (differentialSuite)
+import Node
+import Strings exposing (stringsSuite)
+import Test.Runner.UnitNode as U
+
+
+main : Node.SimpleProgram a
+main =
+    U.run
+        { name = "gren-bigint"
+        , version = "1.0.0"
+        , suites =
+            [ differentialSuite
+            , bigNumbersSuite
+            , bitsSuite
+            , stringsSuite
+            ]
+        }

@@ -1,0 +1,270 @@
+module Differential exposing (differentialSuite)
+
+{-| The cheapest way to be sure of an arbitrary-precision integer: do the same
+sums twice.
+
+Every pair of small integers goes through both `BigInt` and Gren's own `Int`,
+and the answers have to match. Small numbers are where the interesting bugs
+are -- signs, zero, the boundary where a magnitude cancels -- and there are
+enough pairs here that a wrong sign anywhere shows up as forty failures rather
+than as a lucky pass.
+
+The limb boundary is the other half. Base 2^24 means the carries that matter
+happen at 16777216, and no amount of testing near zero goes near them, so the
+same comparison is run over pairs straddling that.
+
+Two things about the big pairs are worth knowing, because both of them made
+this file wrong before they made it right.
+
+`Int` can only be the judge of an answer it can hold, so the pairs used for
+multiplication are kept small enough that their products stay under 2^53.
+
+And the division there is checked against `Math.truncate (a / b)` rather than
+against `//`, because **Gren's `//` truncates its result to 32 bits**:
+`(2^48) // 2` is `0`, and `(2^31) // 1` is `-2147483648`. It is `(a / b) | 0`
+underneath, so it is the quotient and not the operands that has to fit. The
+small pairs above still use `//` -- there it is both correct and the thing
+anyone would actually compare against.
+
+@docs differentialSuite
+
+-}
+
+import Array exposing (Array)
+import BigInt exposing (BigInt)
+import Expect
+import Math
+import String
+import Task
+import Test.Runner.UnitNode as U
+
+
+{-| -}
+differentialSuite : U.Suite
+differentialSuite =
+    U.suite
+        { name = "Differential"
+        , setUpSuite = U.noSuiteFixture
+        , tearDownSuite = U.noTearDown
+        , setUp = \_ -> Task.succeed {}
+        , tearDown = U.noTearDown
+        , tests =
+            [ U.test "add matches Int, for every small pair" <| \_ ->
+                Task.succeed (expectNoMismatch (binary small "+" (\a b -> Just (a + b)) (\a b -> Just (BigInt.add a b))))
+            , U.test "subBy matches Int" <| \_ ->
+                Task.succeed (expectNoMismatch (binary small "-" (\a b -> Just (a - b)) (\a b -> Just (a |> BigInt.subBy b))))
+            , U.test "mul matches Int" <| \_ ->
+                Task.succeed (expectNoMismatch (binary small "*" (\a b -> Just (a * b)) (\a b -> Just (BigInt.mul a b))))
+            -- Gren's `//` truncates toward zero and `Math.modBy` floors, which
+            -- is exactly the split between the two division functions. If
+            -- either is wired to the wrong one, half of these pairs say so.
+            , U.test "quotRemBy quotient matches Int's //" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero
+                            "//"
+                            (\a b -> Just (a // b))
+                            (\a b -> a |> BigInt.quotRemBy b |> Maybe.map .quotient)
+                        )
+                    )
+            , U.test "quotRemBy remainder matches Math.remainderBy" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero
+                            "rem"
+                            (\a b -> Just (Math.remainderBy b a))
+                            (\a b -> a |> BigInt.quotRemBy b |> Maybe.map .remainder)
+                        )
+                    )
+            , U.test "divModBy quotient floors" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero
+                            "div"
+                            (\a b -> Just ((a - Math.modBy b a) // b))
+                            (\a b -> a |> BigInt.divModBy b |> Maybe.map .quotient)
+                        )
+                    )
+            , U.test "divModBy modulus matches Math.modBy" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary nonZero
+                            "mod"
+                            (\a b -> Just (Math.modBy b a))
+                            (\a b -> a |> BigInt.divModBy b |> Maybe.map .modulus)
+                        )
+                    )
+            , U.test "compare matches Int's" <| \_ ->
+                Task.succeed
+                    (Expect.equal []
+                        (small
+                            |> Array.mapAndKeepJust
+                                (\pair ->
+                                    let
+                                        expected =
+                                            Basics.compare pair.a pair.b
+
+                                        actual =
+                                            BigInt.compare (BigInt.fromInt pair.a) (BigInt.fromInt pair.b)
+                                    in
+                                    if expected == actual then
+                                        Nothing
+
+                                    else
+                                        Just (describe pair "compare")
+                                )
+                        )
+                    )
+            -- Everything above stays well inside one limb. These do not.
+            , U.test "add carries across the limb boundary" <| \_ ->
+                Task.succeed (expectNoMismatch (binary boundary "+" (\a b -> Just (a + b)) (\a b -> Just (BigInt.add a b))))
+            , U.test "subBy borrows across the limb boundary" <| \_ ->
+                Task.succeed (expectNoMismatch (binary boundary "-" (\a b -> Just (a - b)) (\a b -> Just (a |> BigInt.subBy b))))
+            , U.test "mul crosses the limb boundary" <| \_ ->
+                Task.succeed (expectNoMismatch (binary modest "*" (\a b -> Just (a * b)) (\a b -> Just (BigInt.mul a b))))
+            , U.test "division crosses the limb boundary" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary (Array.keepIf (\pair -> pair.b /= 0) modest)
+                            "//"
+                            (\a b -> Just (Math.truncate (Basics.toFloat a / Basics.toFloat b)))
+                            (\a b -> a |> BigInt.quotRemBy b |> Maybe.map .quotient)
+                        )
+                    )
+            , U.test "dividing by zero is Nothing rather than a wrong answer" <| \_ ->
+                Task.succeed
+                    (Expect.equal Nothing
+                        (BigInt.fromInt 7 |> BigInt.quotRemBy BigInt.zero |> Maybe.map .quotient)
+                    )
+            , U.test "and so is flooring by zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal Nothing
+                        (BigInt.fromInt 7 |> BigInt.divModBy BigInt.zero |> Maybe.map .quotient)
+                    )
+            ]
+        }
+
+
+type alias Pair =
+    { a : Int, b : Int }
+
+
+{-| Every pair in -24 to 24: zero, both signs, and the crossings between them.
+-}
+small : Array Pair
+small =
+    cross (Array.range -24 24) (Array.range -24 24)
+
+
+nonZero : Array Pair
+nonZero =
+    Array.keepIf (\pair -> pair.b /= 0) small
+
+
+{-| Pairs that straddle a limb, which is where a carry or a borrow has to
+travel. 16777216 is 2^24, and 281474976710656 is 2^48 -- two limbs and three.
+-}
+boundary : Array Pair
+boundary =
+    let
+        interesting =
+            [ 0
+            , 1
+            , 16777215
+            , 16777216
+            , 16777217
+            , 33554431
+            , 33554432
+            , 281474976710655
+            , 281474976710656
+            , -1
+            , -16777215
+            , -16777216
+            , -16777217
+            , -281474976710656
+            ]
+    in
+    cross interesting interesting
+
+
+{-| The same idea, kept small enough that `Int` can still be the judge:
+products stay under 2^50, well inside a double's exact range.
+-}
+modest : Array Pair
+modest =
+    let
+        interesting =
+            [ 0
+            , 1
+            , 16777215
+            , 16777216
+            , 16777217
+            , 33554432
+            , -1
+            , -16777215
+            , -16777216
+            , -16777217
+            ]
+    in
+    cross interesting interesting
+
+
+cross : Array Int -> Array Int -> Array Pair
+cross xs ys =
+    Array.mapAndFlatten (\a -> Array.map (\b -> { a = a, b = b }) ys) xs
+
+
+{-| Run both versions over every pair and collect what disagreed. An array of
+descriptions rather than a bare `False`, because "add is wrong" is not a bug
+report and "-3 + 0 gave 3" is.
+-}
+binary :
+    Array Pair
+    -> String
+    -> (Int -> Int -> Maybe Int)
+    -> (BigInt -> BigInt -> Maybe BigInt)
+    -> Array String
+binary pairs name native big =
+    pairs
+        |> Array.mapAndKeepJust
+            (\pair ->
+                let
+                    expected =
+                        native pair.a pair.b
+
+                    actual =
+                        big (BigInt.fromInt pair.a) (BigInt.fromInt pair.b)
+                            |> Maybe.andThen BigInt.toInt
+                in
+                if expected == actual then
+                    Nothing
+
+                else
+                    Just
+                        (describe pair name
+                            ++ ": expected "
+                            ++ show expected
+                            ++ " but got "
+                            ++ show actual
+                        )
+            )
+
+
+describe : Pair -> String -> String
+describe pair name =
+    String.fromInt pair.a ++ " " ++ name ++ " " ++ String.fromInt pair.b
+
+
+show : Maybe Int -> String
+show value =
+    when value is
+        Just n ->
+            String.fromInt n
+
+        Nothing ->
+            "nothing"
+
+
+expectNoMismatch : Array String -> Expect.Expectation
+expectNoMismatch failures =
+    Expect.equal [] (Array.takeFirst 8 failures)

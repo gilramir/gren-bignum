@@ -1,0 +1,206 @@
+module Strings exposing (stringsSuite)
+
+{-| Reading and writing numbers.
+
+Two things are being checked, and only one of them is the happy path. The other
+is that `fromString` says no: a parser that quietly returns zero for `"twelve"`
+turns a typo into a wrong answer, and a calculator is exactly the program where
+that matters.
+
+The round trips are the cheap way to cover the formatter, which has a chunked
+division inside it that a single hand-written expectation would not exercise.
+
+@docs stringsSuite
+
+-}
+
+import Array exposing (Array)
+import BigInt exposing (BigInt)
+import Expect
+import Maybe exposing (Maybe(..))
+import String
+import Task
+import Test.Runner.UnitNode as U
+
+
+{-| -}
+stringsSuite : U.Suite
+stringsSuite =
+    U.suite
+        { name = "Strings"
+        , setUpSuite = U.noSuiteFixture
+        , tearDownSuite = U.noTearDown
+        , setUp = \_ -> Task.succeed {}
+        , tearDown = U.noTearDown
+        , tests =
+            [ U.test "the prefixes a programmer writes" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "10", Just "255", Just "8", Just "42" ]
+                        [ decimalOf "0b1010"
+                        , decimalOf "0xff"
+                        , decimalOf "0o10"
+                        , decimalOf "42"
+                        ]
+                    )
+            , U.test "in either case, with either sign" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "255", Just "-255", Just "255", Just "-3735928559" ]
+                        [ decimalOf "0XFF"
+                        , decimalOf "-0xFF"
+                        , decimalOf "+0xff"
+                        , decimalOf "-0xDEADBEEF"
+                        ]
+                    )
+            , U.test "underscores are ignored wherever they fall" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "3735928559", Just "1000000" ]
+                        [ decimalOf "0xdead_beef"
+                        , decimalOf "1_000_000"
+                        ]
+                    )
+            , U.test "and nonsense is Nothing, not zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Nothing, Nothing ]
+                        [ decimalOf "12 apples"
+                        , decimalOf "twelve"
+                        , decimalOf ""
+                        , decimalOf "0x"
+                        , decimalOf "-"
+                        ]
+                    )
+            , U.test "a digit outside the base is Nothing too" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Just "7" ]
+                        [ decimalOf "0b12"
+                        , decimalOf "0o18"
+                        , decimalOf "0b111"
+                        ]
+                    )
+            , U.test "zero survives every route" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0", Just "0", Just "0", Just "0", Just "0" ]
+                        [ decimalOf "0"
+                        , decimalOf "0x0"
+                        , decimalOf "-0"
+                        , Just (BigInt.toString BigInt.zero)
+                        , Just (BigInt.toStringWithBase 16 BigInt.zero)
+                        ]
+                    )
+            , U.test "a base is written without a prefix, and a sign with one" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "ff", "-ff", "1010", "377", "byw97um9s91dlz68tsi" ]
+                        [ BigInt.toStringWithBase 16 (num 255)
+                        , BigInt.toStringWithBase 16 (num -255)
+                        , BigInt.toStringWithBase 2 (num 10)
+                        , BigInt.toStringWithBase 8 (num 255)
+                        , BigInt.toStringWithBase 36 (big "123456789012345678901234567890")
+                        ]
+                    )
+            , U.test "a base outside 2 to 36 writes nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "", "" ]
+                        [ BigInt.toStringWithBase 1 (num 255)
+                        , BigInt.toStringWithBase 37 (num 255)
+                        ]
+                    )
+            , U.test "and reads nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing ]
+                        [ Maybe.map BigInt.toString (BigInt.fromStringWithBase 1 "11")
+                        , Maybe.map BigInt.toString (BigInt.fromStringWithBase 64 "11")
+                        ]
+                    )
+            -- The formatter divides by the largest power of the base that fits
+            -- in a limb and pads what comes back, so a chunk of zeroes in the
+            -- middle of a number is the thing it can get wrong.
+            , U.test "a number with a run of zeroes in the middle" <| \_ ->
+                Task.succeed
+                    (Expect.equal "1000000000000000000000001"
+                        (BigInt.toString
+                            (BigInt.add (BigInt.fromInt 10 |> BigInt.powBy 24) BigInt.one)
+                        )
+                    )
+            , U.test "and the same in hex" <| \_ ->
+                Task.succeed
+                    (Expect.equal "10000000000000000000000001"
+                        (BigInt.toStringWithBase 16
+                            (BigInt.add (BigInt.fromInt 2 |> BigInt.powBy 100) BigInt.one)
+                        )
+                    )
+            , U.test "every base round trips, for a number of every size" <| \_ ->
+                Task.succeed (Expect.equal [] (Array.takeFirst 8 roundTripFailures))
+            ]
+        }
+
+
+{-| Write it, read it back, and see whether it is the same number -- for every
+base the package claims to support, over values from one limb to five, in both
+signs.
+-}
+roundTripFailures : Array String
+roundTripFailures =
+    let
+        values =
+            [ BigInt.zero
+            , num 1
+            , num -1
+            , num 16777215
+            , num 16777216
+            , num 16777217
+            , big "18446744073709551615"
+            , big "-18446744073709551615"
+            , big "1267650600228229401496703205376"
+            , big "-123456789012345678901234567890"
+            , BigInt.fromInt 10 |> BigInt.powBy 40
+            ]
+    in
+    Array.range 2 36
+        |> Array.mapAndFlatten
+            (\base ->
+                values
+                    |> Array.mapAndKeepJust
+                        (\value ->
+                            let
+                                written =
+                                    BigInt.toStringWithBase base value
+
+                                back =
+                                    BigInt.fromStringWithBase base written
+                            in
+                            if back == Just value then
+                                Nothing
+
+                            else
+                                Just
+                                    ("base "
+                                        ++ String.fromInt base
+                                        ++ ": "
+                                        ++ BigInt.toString value
+                                        ++ " wrote "
+                                        ++ written
+                                        ++ " and read back "
+                                        ++ (when back is
+                                                Just it ->
+                                                    BigInt.toString it
+
+                                                Nothing ->
+                                                    "nothing"
+                                           )
+                                    )
+                        )
+            )
+
+
+decimalOf : String -> Maybe String
+decimalOf text =
+    Maybe.map BigInt.toString (BigInt.fromString text)
+
+
+num : Int -> BigInt
+num =
+    BigInt.fromInt
+
+
+big : String -> BigInt
+big text =
+    Maybe.withDefault BigInt.zero (BigInt.fromString text)
