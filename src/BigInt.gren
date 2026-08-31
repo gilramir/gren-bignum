@@ -126,11 +126,14 @@ Sign and magnitude rather than two's complement: a `Bool` for the sign, and an
 array of 24-bit limbs for the magnitude, least significant first, with no
 leading zeroes. Zero is the empty array, and is never negative.
 
-Twenty-four bits because every power-of-two base anyone formats in divides it
-evenly -- six hex digits to a limb, eight octal, twenty-four binary -- so those
-conversions are slicing rather than arithmetic. And because it leaves room to
-multiply: a limb times a limb plus a carry stays under 2^48, which a double
-still holds exactly.
+Limbs smaller than the range a double holds exactly is the standard way to do
+this -- CPython uses 30-bit digits, bn.js uses 26 -- and the reason is
+multiplication: a limb times a limb plus a carry has to stay under 2^53. What
+is particular here is the 24, which spends two of bn.js's bits on a different
+property: 24 is divisible by 1, 2, 3 and 4, so binary, octal and hexadecimal
+all land on limb boundaries and formatting in them is slicing rather than
+arithmetic. See the README for who this belongs to; the algorithms are
+Knuth's.
 
 Two's complement does appear, in [`and`](#and) and its neighbours, which read a
 value *as if* it were two's complement of unbounded width. That is the only

@@ -31,6 +31,11 @@ The operands are fine at any size; it is the **quotient** that has to fit.
 division is silently wrong exactly when its result lands outside signed 32-bit
 range — including `bigNumber // 1`.
 
+Filed as [gren-lang/compiler#383](https://github.com/gren-lang/compiler/issues/383):
+the compiler inlines `//` as `(a / b) | 0` while core's kernel uses
+`Math.trunc`, so the same expression gives two answers depending on whether it
+was inlined.
+
 ## Widths, which is the interesting part
 
 A `BigInt` has no width. What it has instead is a way to *ask* for one, so the
@@ -99,9 +104,52 @@ so those conversions are slicing rather than arithmetic. And because a limb
 times a limb plus a carry stays under 2^48, which a double still holds exactly.
 
 Multiplication is long multiplication a row at a time. Division is Knuth's
-algorithm D, written as a fold rather than as mutation of a scratch buffer,
+Algorithm D, written as a fold rather than as mutation of a scratch buffer,
 with both operands normalised first so the trial quotient is never more than
 two too high.
+
+## Where the technique comes from
+
+None of the arithmetic here is original, and the parts of it that look clever
+are sixty years old. Since this is the sort of thing that gets mistaken for
+invention, here is who it actually belongs to.
+
+**Limbs smaller than the machine's exact range** is the standard way to build
+multi-precision arithmetic on a numeric type that cannot detect its own
+overflow. Knuth sets out the classical algorithms for an arbitrary radix *b* in
+*The Art of Computer Programming*, Vol. 2, §4.3.1 — Algorithm A (addition),
+S (subtraction), M (multiplication) and D (division) — and every operation in
+this package is one of those four. The division is Algorithm D as given there,
+including the normalisation step and the result that a trial quotient formed
+from the leading digits is then never more than two too large. The `correct`
+loop in the source exists because of that bound, and would be unbounded
+without it.
+
+**Choosing the radix below the word size** is what every implementation on a
+platform with no double-width integer type does. CPython stores 30-bit digits
+in a 32-bit type so that a product fits the `twodigits` type it multiplies
+into; [bn.js][bnjs], working with exactly the doubles Gren has, uses 26-bit
+limbs, because 26 + 26 = 52 fits inside a double's 53-bit significand. The
+reasoning behind 24 here is theirs, not ours.
+
+**What is local to this package is the number itself, and it is a trade rather
+than an idea.** 26 bits would give more room per limb. 24 gives two of those
+bits up to buy a different property: it is divisible by 1, 2, 3 and 4, so
+binary, octal and hexadecimal all land on limb boundaries, and formatting in
+them is slicing instead of repeated division. For a package whose reason to
+exist is looking at values in hex, that is the right way round — but it is a
+choice among standard ones, not a new one.
+
+### References
+
+- Donald E. Knuth, *The Art of Computer Programming*, Vol. 2: *Seminumerical
+  Algorithms*, §4.3.1 "The Classical Algorithms".
+- CPython, [`Include/cpython/longintrepr.h`][cpython] — 30-bit digits, and the
+  constraints on `PyLong_SHIFT` that decide them.
+- [bn.js][bnjs] — 26-bit limbs, the same trade on the same doubles.
+
+[cpython]: https://github.com/python/cpython/blob/main/Include/cpython/longintrepr.h
+[bnjs]: https://github.com/indutny/bn.js/
 
 ## Tests
 
