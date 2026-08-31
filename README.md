@@ -94,6 +94,31 @@ declared how wide the number is. `shiftRightBy` is arithmetic: it floors, so
 so `0xdead_beef` parses. Anything it does not understand is `Nothing` rather
 than zero.
 
+**Floats go in exactly and come out rounded, and only one of those is
+surprising.** `fromFloat` truncates toward zero — `-3.7` is `-3`, not `-4` —
+and `NaN` and the infinities are `Nothing`. What it is not is approximate:
+
+```gren
+BigInt.fromFloat 1.0e30 |> Maybe.map BigInt.toString
+--> Just "1000000000000000019884624838656"
+```
+
+Those digits are not noise. That *is* `1e30` — past a certain exponent a
+double is an integer, just not usually the one you typed, and this is the
+function that shows you which one you actually have.
+
+`toFloat` is the lossy direction, because a `Float` is the thing with the
+fixed significand:
+
+```gren
+toFloat (2^64 + 1) == toFloat (2^64)   -- True; the 1 is gone
+toString (2^64 + 1)                    -- "18446744073709551617"; still there
+```
+
+So a `BigInt` survives a round trip through a `String` and does not survive
+one through a `Float` above 2^53. If you are storing these anywhere, store
+the string. `toInt` is the one that refuses rather than rounds.
+
 ## Argument order
 
 The operations where order matters take their subject **last**, matching

@@ -112,6 +112,11 @@ bigNumbersSuite =
                             == GT
                         )
                     )
+            , U.test "and it truncates toward zero, not toward the floor" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "-3")
+                        (Maybe.map BigInt.toString (BigInt.fromFloat -3.7))
+                    )
             , U.test "NaN is not a number" <| \_ ->
                 Task.succeed (Expect.equal Nothing (BigInt.fromFloat (0 / 0)))
             , U.test "nor is infinity" <| \_ ->
@@ -120,6 +125,22 @@ bigNumbersSuite =
                 Task.succeed
                     (Expect.equal 1.8446744073709552e19
                         (BigInt.toFloat (BigInt.one |> BigInt.shiftLeftBy 64 |> BigInt.subBy BigInt.one))
+                    )
+            -- The round trip is lossy in one direction only, and the README
+            -- says so. Above 2^53 a Float has no bit left for the one, so
+            -- these two distinct values become the same Float while their
+            -- strings stay different.
+            , U.test "and rounding loses a value that toString keeps" <| \_ ->
+                let
+                    big =
+                        BigInt.one |> BigInt.shiftLeftBy 64
+                in
+                Task.succeed
+                    (Expect.equal
+                        { sameFloat = True, sameString = False }
+                        { sameFloat = BigInt.toFloat (BigInt.add big BigInt.one) == BigInt.toFloat big
+                        , sameString = BigInt.toString (BigInt.add big BigInt.one) == BigInt.toString big
+                        }
                     )
             , U.test "a negative exponent truncates rather than failing" <| \_ ->
                 Task.succeed (Expect.equal "0" (BigInt.toString (BigInt.fromInt 2 |> BigInt.powBy -3)))

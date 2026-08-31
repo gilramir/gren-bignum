@@ -257,6 +257,22 @@ toInt value =
 {-| Truncate a `Float` toward zero. `NaN` and the infinities are `Nothing`;
 everything else has an exact integer part however large it is, because past a
 certain exponent a double *is* an integer.
+
+Toward zero, not floored, which is the same split as
+[`quotRemBy`](#quotRemBy) against [`divModBy`](#divModBy):
+
+    BigInt.fromFloat -3.7 --> Just (BigInt.fromInt -3)
+
+And exact rather than approximate, which is easier to believe with the digits
+in front of you:
+
+    BigInt.fromFloat 1.0e30 |> Maybe.map BigInt.toString
+    --> Just "1000000000000000019884624838656"
+
+That is not noise on the end of `1e30`. That is what the double has been all
+along, and this is the function that shows you which integer you actually
+have. [`toFloat`](#toFloat) is the direction that loses it again.
+
 -}
 fromFloat : Float -> Maybe BigInt
 fromFloat f =
@@ -284,6 +300,16 @@ fromFloat f =
 
 {-| To a `Float`, rounding once it no longer fits -- which is what a `Float` is
 for. [`toInt`](#toInt) is the one that refuses.
+
+So this is the lossy half of the round trip, and above 2^53 it is lossy
+quietly:
+
+    BigInt.toFloat (BigInt.add big BigInt.one) == BigInt.toFloat big
+    -- True for big = 2^64, and nothing says the one went missing
+
+[`fromFloat`](#fromFloat) does not lose anything going the other way, so a
+value survives `String` and back but not `Float` and back. Store the string.
+
 -}
 toFloat : BigInt -> Float
 toFloat (BigInt value) =
