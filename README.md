@@ -325,10 +325,14 @@ BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3
 
 ### Splitting a total
 
+Sometimes you need to divide a value into individual quantities that
+will sum up to the original value, always. You cannot round, you must *share*
+the remainder.
+
 Dividing two numbers answers "what is one share". However, consider the
 case of money. `10.00` divided by 3 is `3.33` to the
-cent however it is rounded, and three of those is `9.99`. The missing `0.01` is
-not a rounding to be thrown away. Thus, `allocate`:
+cent however it is rounded, and three of those is `9.99`. The missing `0.01`
+can't be just thrown away. Thus, `allocate`:
 
 ```gren
 BigDecimal.fromString "10.00" |> Maybe.andThen (BigDecimal.allocate 2 3)

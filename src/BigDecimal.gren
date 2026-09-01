@@ -115,8 +115,9 @@ and only the caller knows which outcome is acceptable.
 
 ## Splitting a total
 
-Dividing rounds each share on its own, so the shares stop adding up to the
-thing you divided. These two hand out the difference instead of losing it.
+Sometimes you need to divide a value into individual quantities that
+will sum up to the original value, always. You cannot round, you must *share*
+the remainder.
 
 @docs allocate, allocateBy
 
