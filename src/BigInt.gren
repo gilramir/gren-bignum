@@ -46,8 +46,7 @@ module BigInt exposing
     , zero
     )
 
-{-| Integers of any size, and the fixed-width views of them that you need
-when you are checking what a real machine did.
+{-| Integers of any size, and the fixed-width views of them if you need them.
 
 A Gren `Int` is a double, so it is exact up to 2^53 and wrong above that. That
 is fine until you are working out what a `uint64` did, and then it is the
@@ -276,8 +275,7 @@ against [`divModBy`](#divModBy):
 
     BigInt.fromFloat -3.7 --> Just (BigInt.fromInt -3)
 
-The result is exact, not approximate, which is easier to believe with the
-digits in front of you:
+The result is exact, not approximate. Example:
 
     BigInt.fromFloat 1.0e30 |> Maybe.map BigInt.toString
     --> Just "1000000000000000019884624838656"
@@ -311,8 +309,7 @@ fromFloat f =
         Just (make (f < 0) (go (Math.abs f) []))
 
 
-{-| To a `Float`, rounding once the value no longer fits. [`toInt`](#toInt)
-is the conversion that refuses instead.
+{-| To a `Float`, rounding once the value no longer fits.
 
 This is the lossy half of the round trip, and above 2^53 it is lossy quietly:
 

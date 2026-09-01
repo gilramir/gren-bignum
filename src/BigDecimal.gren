@@ -34,8 +34,8 @@ module BigDecimal exposing
     , zero
     )
 
-{-| Exact decimal numbers: the numbers a person wrote down, arithmetic that
-keeps every digit of them, and rounding only when you ask for it by name.
+{-| Exact decimal numbers: arithmetic that keeps every digit without
+losing precision, and rounding only when you ask for it.
 
 A `Float` cannot hold `0.1`. What it holds is
 `0.1000000000000000055511151231257827`, which is close enough until you add
