@@ -1,5 +1,6 @@
 module BigInt exposing
     ( BigInt
+    , Error(..)
     , abs
     , add
     , and
@@ -14,6 +15,8 @@ module BigInt exposing
     , fromInt
     , fromString
     , fromStringWithBase
+    , fromStringWithBaseWithin
+    , fromStringWithin
     , isEven
     , isNegative
     , isOdd
@@ -43,15 +46,15 @@ module BigInt exposing
     , zero
     )
 
-{-| Integers that do not overflow, and the fixed-width views of them that a
-programmer actually asks for.
+{-| Integers of any size, and the fixed-width views of them that you need
+when you are checking what a real machine did.
 
-A Gren `Int` is a double, so it is exact up to 2^53 and quietly wrong above it.
-That is fine until the day you are working out what a `uint64` did, and then it
-is the whole problem: `0xFFFFFFFFFFFFFFFF` is not representable, and what comes
-back instead is `18446744073709552000`, with nothing to say so.
+A Gren `Int` is a double, so it is exact up to 2^53 and wrong above that. That
+is fine until you are working out what a `uint64` did, and then it is the
+whole problem: `0xFFFFFFFFFFFFFFFF` is not representable, and what comes back
+instead is `18446744073709552000`, with nothing to say so.
 
-A `BigInt` has no width. What it has instead is a way to *ask* for one:
+A `BigInt` has no width. Instead, it has a way to ask for one:
 
     -- what does this look like as a uint64?
     BigInt.maskTo 64 x
@@ -62,8 +65,8 @@ A `BigInt` has no width. What it has instead is a way to *ask* for one:
     -- would it have overflowed?
     BigInt.fitsSigned 64 x
 
-so a width is a question you put to a value rather than a property the value
-carries and can silently break.
+The width is a question you put to a value, not a property the value carries
+around and can silently violate.
 
 @docs BigInt
 
@@ -78,6 +81,11 @@ carries and can silently break.
 @docs fromString, toString, fromStringWithBase, toStringWithBase
 
 
+## Reading text you did not write
+
+@docs fromStringWithin, fromStringWithBaseWithin, Error
+
+
 ## Arithmetic
 
 @docs add, subBy, mul, negate, abs, powBy
@@ -85,8 +93,9 @@ carries and can silently break.
 
 ## Dividing
 
-Two of them, because a programmer gets asked both, and each comes in three
-forms: the pair, and either half on its own.
+There are two, because C and Python define division differently and you are
+usually checking one of them. Each comes in three forms: the pair, and either
+half on its own.
 
 @docs quotRemBy, quotBy, remainderBy
 @docs divModBy, divBy, modBy
@@ -109,17 +118,17 @@ forms: the pair, and either half on its own.
 
 ## A note on argument order
 
-The operations where the order matters take their subject **last**, matching
-`Math.modBy`, `Math.remainderBy` and `Bitwise.shiftLeftBy`:
+Wherever the order of the operands matters, the subject comes **last**. This
+matches `Math.modBy`, `Math.remainderBy` and `Bitwise.shiftLeftBy` in core:
 
     a |> BigInt.subBy one -- a - 1
 
-    a |> BigInt.quotRemBy two -- a / 2
+    a |> BigInt.quotRemBy (BigInt.fromInt 2) -- a / 2
 
     a |> BigInt.shiftLeftBy 8 -- a << 8
 
-`compare` is the exception, and for the same reason: it stands in for
-`Basics.compare`, so it takes its arguments the way that one does.
+`compare` is the exception. It stands in for `Basics.compare`, so it takes its
+arguments in the same order that one does.
 
 -}
 
@@ -137,25 +146,27 @@ import String
 
 {-| An integer of any size.
 
-Sign and magnitude rather than two's complement: a `Bool` for the sign, and an
-array of 24-bit limbs for the magnitude, least significant first, with no
-leading zeroes. Zero is the empty array, and is never negative.
+The representation is sign and magnitude rather than two's complement: a
+`Bool` for the sign, and an array of 24-bit limbs for the magnitude, least
+significant first, with no leading zero limbs. Zero is the empty array, and is
+never negative.
 
-Limbs smaller than the range a double holds exactly is the standard way to do
-this -- CPython uses 30-bit digits, bn.js uses 26 -- and the reason is
+Limbs smaller than the range a double holds exactly is the standard way to
+build this. CPython uses 30-bit digits and bn.js uses 26, and the reason is
 multiplication: a limb times a limb plus a carry has to stay under 2^53. What
-is particular here is the 24, which spends two of bn.js's bits on a different
+is particular here is the 24. It gives up two of bn.js's bits for a different
 property: 24 is divisible by 1, 2, 3 and 4, so binary, octal and hexadecimal
-all land on limb boundaries. One limb is exactly six hex digits, eight octal,
-twenty-four binary, so [`toStringWithBase`](#toStringWithBase) writes those
-bases by slicing the limbs apart rather than dividing the number down -- see
-`sliceLimbs`. Every other base, base 32 included, has to divide. See the README
-for who all of this belongs to; the algorithms are Knuth's.
+all land on limb boundaries. One limb is exactly six hex digits, eight octal
+digits, or twenty-four binary digits, so
+[`toStringWithBase`](#toStringWithBase) writes those bases by slicing the
+limbs apart rather than by dividing the number down (see `sliceLimbs`). Every
+other base, base 32 included, has to divide. The README says where all of this
+comes from; the algorithms are Knuth's.
 
-Two's complement does appear, in [`and`](#and) and its neighbours, which read a
-value *as if* it were two's complement of unbounded width. That is the only
-reading under which `complement 5` can be `-6` without anybody having declared
-how wide the number is.
+Two's complement does appear, in [`and`](#and) and its neighbours, which read
+a value *as if* it were two's complement of unbounded width. That is the only
+reading under which `complement 5` can be `-6` when nobody has said how wide
+the number is.
 
 -}
 type BigInt
@@ -185,13 +196,13 @@ limbBaseFloat =
 
 {-| Zero.
 
-Worth having by name rather than as `fromInt 0`, because it is the value the
-whole representation is normalised around: a magnitude that cancels becomes
-the empty limb array, and an empty limb array is never negative. So `zero` is
-the *only* zero there is, and `x |> subBy x == BigInt.zero` is a fair test
-rather than an accident.
+This is the value the whole representation is normalised around: a magnitude
+that cancels becomes the empty limb array, and an empty limb array is never
+negative. So there is exactly one zero, and `x |> subBy x == BigInt.zero` is
+a reliable test.
 
-It is also the divisor that makes every division here `Nothing`.
+It is also the divisor that makes every division in this module return
+`Nothing`.
 
 -}
 zero : BigInt
@@ -201,8 +212,8 @@ zero =
 
 {-| One.
 
-The step, mostly: `x |> add one` and `x |> subBy one`. It is also what an
-empty product comes to, so `powBy 0` gives it back for any base.
+Mostly the step: `x |> add one` and `x |> subBy one`. It is also the empty
+product, so `powBy 0` returns it for any base.
 
 -}
 one : BigInt
@@ -212,7 +223,7 @@ one =
 
 {-| Build a value from a sign and a magnitude, normalising both: leading zero
 limbs go, and a zero magnitude is never negative. Every value in this module is
-made here, which is what keeps `==` meaningful.
+made here, which is what makes `==` mean numeric equality.
 -}
 make : Bool -> Array Int -> BigInt
 make negative limbs =
@@ -232,8 +243,8 @@ unwrap (BigInt value) =
     value.limbs
 
 
-{-| An ordinary `Int`. Above 2^53 an `Int` is already inexact, so this is
-faithful to the double you handed over rather than to the number you meant.
+{-| An ordinary `Int`. Above 2^53 an `Int` is already inexact, so this
+converts the double you passed, not the number you meant.
 -}
 fromInt : Int -> BigInt
 fromInt n =
@@ -243,9 +254,9 @@ fromInt n =
     Maybe.withDefault zero (fromFloat (Basics.toFloat n))
 
 
-{-| Back to an `Int`, when it fits in one exactly -- which means no larger than
-`Math.maxSafeInteger`. Anything bigger is `Nothing` rather than a number that
-is almost right.
+{-| Back to an `Int`, when it fits in one exactly, which means no larger than
+`Math.maxSafeInteger`. Anything bigger is `Nothing`, not a number that is
+almost right.
 -}
 toInt : BigInt -> Maybe Int
 toInt value =
@@ -256,23 +267,23 @@ toInt value =
         Just (Math.truncate (toFloat value))
 
 
-{-| Truncate a `Float` toward zero. `NaN` and the infinities are `Nothing`;
-everything else has an exact integer part however large it is, because past a
+{-| Truncate a `Float` toward zero. `NaN` and the infinities are `Nothing`.
+Everything else has an exact integer part, however large, because past a
 certain exponent a double *is* an integer.
 
-Toward zero, not floored, which is the same split as
-[`quotRemBy`](#quotRemBy) against [`divModBy`](#divModBy):
+Toward zero rather than floored, the same split as [`quotRemBy`](#quotRemBy)
+against [`divModBy`](#divModBy):
 
     BigInt.fromFloat -3.7 --> Just (BigInt.fromInt -3)
 
-And exact rather than approximate, which is easier to believe with the digits
-in front of you:
+The result is exact, not approximate, which is easier to believe with the
+digits in front of you:
 
     BigInt.fromFloat 1.0e30 |> Maybe.map BigInt.toString
     --> Just "1000000000000000019884624838656"
 
-That is not noise on the end of `1e30`. That is what the double has been all
-along, and this is the function that shows you which integer you actually
+Those trailing digits are not noise. That is the integer the double has held
+all along, and this is the function that shows you which one you actually
 have. [`toFloat`](#toFloat) is the direction that loses it again.
 
 -}
@@ -300,17 +311,17 @@ fromFloat f =
         Just (make (f < 0) (go (Math.abs f) []))
 
 
-{-| To a `Float`, rounding once it no longer fits -- which is what a `Float` is
-for. [`toInt`](#toInt) is the one that refuses.
+{-| To a `Float`, rounding once the value no longer fits. [`toInt`](#toInt)
+is the conversion that refuses instead.
 
-So this is the lossy half of the round trip, and above 2^53 it is lossy
-quietly:
+This is the lossy half of the round trip, and above 2^53 it is lossy quietly:
 
     BigInt.toFloat (BigInt.add big BigInt.one) == BigInt.toFloat big
     -- True for big = 2^64, and nothing says the one went missing
 
-[`fromFloat`](#fromFloat) does not lose anything going the other way, so a
-value survives `String` and back but not `Float` and back. Store the string.
+[`fromFloat`](#fromFloat) loses nothing going the other way, so a value
+survives a round trip through a `String` but not through a `Float`. If you
+need to store one, store the string.
 
 -}
 toFloat : BigInt -> Float
@@ -434,8 +445,8 @@ magSub a b =
 
 
 {-| One limb times a magnitude. A limb times a limb plus a carry is under 2^48,
-so every step of this is exact -- which is the property the choice of base was
-made for.
+so every step of this is exact, which is the property the limb size was
+chosen for.
 -}
 mulByLimb : Int -> Array Int -> Array Int
 mulByLimb factor limbs =
@@ -614,14 +625,14 @@ limbBitLength limb =
         1 + limbBitLength (limb // 2)
 
 
-{-| Long division: Knuth's algorithm D, written as a fold rather than as
+{-| Long division: Knuth's Algorithm D, written as a fold rather than as
 mutation of a scratch buffer.
 
-Both operands are shifted left until the divisor's top limb fills at least half
-of one, which is what bounds the error in the trial quotient below to two -- so
-the correction loop runs at most twice however unlucky the numbers are. Without
-that normalisation the same estimate can be arbitrarily bad and the loop that
-fixes it *becomes* the algorithm.
+Both operands are shifted left until the divisor's top limb fills at least
+half of one. That is what bounds the error in the trial quotient to two, so
+the correction loop runs at most twice however unlucky the numbers are.
+Without the normalisation the estimate can be arbitrarily bad, and the loop
+that fixes it would become the whole algorithm.
 
 -}
 magDivMod : Array Int -> Array Int -> { quotient : Array Int, remainder : Array Int }
@@ -693,8 +704,8 @@ longDivide dividend divisor =
 
 
 {-| Walk the trial quotient down until it fits. Normalisation caps this at two
-turns; it is a loop rather than two subtractions because being wrong here would
-be silent.
+turns. It is a loop rather than two subtractions because if that bound were
+ever wrong, two subtractions would fail silently.
 -}
 correct : Int -> Array Int -> Array Int -> Int
 correct digit current divisor =
@@ -711,10 +722,10 @@ correct digit current divisor =
 -- ARITHMETIC
 
 
-{-| Add. There is no overflow to think about, which is the point.
+{-| Add. There is no overflow to think about.
 
-No `By` suffix, unlike [`subBy`](#subBy), because addition is commutative and
-so there is no subject for the pipeline to favour.
+No `By` suffix, unlike [`subBy`](#subBy), because addition is commutative, so
+there is no subject for a pipeline to put last.
 
 Sign and magnitude means this is only sometimes an addition: when the signs
 differ it is the smaller magnitude subtracted from the larger, and the answer
@@ -747,7 +758,7 @@ subBy b a =
 
 {-| Multiply, exactly, however big the answer gets. Commutative, so no `By`.
 
-The sign is just whether the signs differed; the magnitudes go through long
+The sign is whether the two signs differed. The magnitudes go through long
 multiplication, a row at a time, so the cost is the product of the two
 lengths.
 
@@ -760,8 +771,8 @@ mul (BigInt a) (BigInt b) =
 {-| Flip the sign. The limbs are handed through untouched: no arithmetic
 happens here at any size, only the sign changes.
 
-`negate zero` is `zero`: it goes through `make`, which refuses to hand back a
-negative zero, so there is only ever one of them.
+`negate zero` is `zero`: it goes through `make`, which never produces a
+negative zero, so there is only ever one.
 
 -}
 negate : BigInt -> BigInt
@@ -771,10 +782,10 @@ negate (BigInt value) =
 
 {-| Drop the sign. Again the limbs pass through untouched.
 
-Worth saying that this one cannot fail. `abs` of the most negative value is
-the classic fixed-width bug -- there is no positive `Int.minValue` to return,
-so it comes back negative. A `BigInt` has no most negative value for that to
-happen at.
+This one cannot fail. `abs` of the most negative value is the classic
+fixed-width bug: there is no positive `Int.minValue` to return, so it comes
+back negative. A `BigInt` has no most negative value, so the bug has nowhere
+to happen.
 
 -}
 abs : BigInt -> BigInt
@@ -784,10 +795,10 @@ abs (BigInt value) =
 
 {-| Raise to a power: `powBy exponent base`.
 
-A negative exponent is neither an error nor a special case -- it is the
-truncated integer answer, which is what every other division here gives. Two to
-the minus three is an eighth, truncated to zero; one to any negative power is
-one; and zero to a negative power, the one genuinely undefined case, is zero.
+A negative exponent is not an error. It gives the truncated integer answer,
+the same as every other division in this module: two to the minus three is an
+eighth, truncated to zero; one to any negative power is one; and zero to a
+negative power, the only genuinely undefined case, is zero.
 
     BigInt.fromInt 2 |> BigInt.powBy 10 --> BigInt.fromInt 1024
 
@@ -841,7 +852,7 @@ quotRemBy (BigInt divisor) (BigInt dividend) =
 
 
 {-| The quotient alone, truncating toward zero: `quotBy divisor dividend`.
-Gren's `//`, except that it is right above 2^31.
+This is Gren's `//`, except that it is still correct above 2^31.
 
     BigInt.fromInt -7 |> BigInt.quotBy (BigInt.fromInt 2)
     --> Just (BigInt.fromInt -3)
@@ -876,9 +887,8 @@ remainderBy divisor dividend =
 
 `-7 / 2` is `-4` modulus `1` here.
 
-The two differ only when exactly one operand is negative, and which one you
-want depends on whether you are checking C or Python. Both are here because a
-calculator gets asked both.
+The two differ only when exactly one operand is negative. Which one you want
+depends on whether you are checking C or Python, so both are here.
 
 -}
 divModBy : BigInt -> BigInt -> Maybe { quotient : BigInt, modulus : BigInt }
@@ -952,7 +962,7 @@ compare (BigInt a) (BigInt b) =
 nothing at any size.
 
 `x == BigInt.zero` gives the same answer, because normalisation guarantees a
-single representation. This one just says what it means.
+single representation. This one just reads better.
 
 -}
 isZero : BigInt -> Bool
@@ -969,10 +979,10 @@ isNegative (BigInt value) =
 
 {-| Whether this is a multiple of two. Zero is.
 
-Cheap, and cheaper than it looks: limbs are little-endian, so the bottom bit of
-the bottom limb is the answer, and no part of the rest of the number is read.
-Asking through a division instead -- `modBy two` -- walks every limb and
-builds a quotient nobody wanted.
+This reads only the bottom bit of the bottom limb, since the limbs are
+little-endian; nothing else in the number is touched. Asking through a
+division instead (`modBy (fromInt 2)`) walks every limb and builds a quotient
+nobody wanted.
 
 The sign does not come into it, because the representation is sign and
 magnitude and `-7` is odd for the same reason `7` is.
@@ -1168,7 +1178,7 @@ limbPopCount limb =
 -- WIDTHS
 
 
-{-| The low `width` bits, as a number that is never negative -- which is what
+{-| The low `width` bits, as a number that is never negative, which is what
 reading a value as an unsigned integer of that width means.
 
     BigInt.fromInt -1 |> BigInt.maskTo 64 |> BigInt.toString
@@ -1187,7 +1197,7 @@ maskTo width value =
             |> Maybe.withDefault zero
 
 
-{-| The low `width` bits read as two's complement -- which is what reading a
+{-| The low `width` bits read as two's complement, which is what reading a
 value as a signed integer of that width means.
 
     BigInt.fromString "0xFFFFFFFFFFFFFFFF"
@@ -1212,8 +1222,8 @@ toSigned width value =
             masked |> subBy (powerOfTwo width)
 
 
-{-| Would this survive being stored in a signed integer of this width -- is it
-within `-2^(width-1)` to `2^(width-1) - 1`?
+{-| Would this survive being stored in a signed integer of this width? That
+is, is it within `-2^(width-1)` to `2^(width-1) - 1`?
 -}
 fitsSigned : Int -> BigInt -> Bool
 fitsSigned width value =
@@ -1231,7 +1241,11 @@ fitsSigned width value =
 -}
 fitsUnsigned : Int -> BigInt -> Bool
 fitsUnsigned width value =
-    not (isNegative value) && bitLength value <= width
+    if width <= 0 then
+        isZero value
+
+    else
+        not (isNegative value) && bitLength value <= width
 
 
 powerOfTwo : Int -> BigInt
@@ -1245,8 +1259,9 @@ powerOfTwo exponent =
 {-| Read a number written the way it would be in source: an optional sign, then
 `0x`, `0b` or `0o` and its digits, or plain decimal.
 
-Underscores are ignored wherever they fall, so `0xdead_beef` and `1_000_000`
-both parse.
+An underscore between two digits is ignored, so `0xdead_beef` and
+`1_000_000` both parse, and so does `1__000`. An underscore anywhere else is
+not a separator, so `_1`, `1_` and `0x_ff` are `Nothing`.
 
     BigInt.fromString "0b1010" --> Just (BigInt.fromInt 10)
 
@@ -1271,18 +1286,125 @@ fromString text =
             else
                 digits 10 negative body
     in
-    withSign parse (String.replace "_" "" text)
+    withSign parse text
+
+
+{-| Why [`fromStringWithin`](#fromStringWithin) refused.
+
+`NotANumber` is everything the plain [`fromString`](#fromString) returns
+`Nothing` for. `TooLong` is a well-formed number that needs more digits than
+the limit allows, and it says how many.
+
+-}
+type Error
+    = NotANumber
+    | TooLong { digits : Int, limit : Int }
+
+
+{-| [`fromString`](#fromString) with a ceiling on how many digits the number
+may have, for text that comes from somewhere you do not control:
+`fromStringWithin limit text`.
+
+The plain `fromString` does what it is told. A string of a million digits is
+a million-digit number, and parsing it costs time that grows with the square
+of its length. When the text is untrusted, say how big a number you are
+prepared to accept, and anything longer is refused before any arithmetic
+starts:
+
+    BigInt.fromStringWithin 20 "18446744073709551615"
+        |> Result.map BigInt.toString
+    --> Ok "18446744073709551615"
+
+    BigInt.fromStringWithin 20 "123456789012345678901"
+    --> Err (BigInt.TooLong { digits = 21, limit = 20 })
+
+    BigInt.fromStringWithin 20 "twelve"
+    --> Err BigInt.NotANumber
+
+The digits are counted in the base the text is written in, after the sign,
+the prefix, any separators and any leading zeroes, so `0x0000ff` is two
+digits. Zero is one digit. A limit below one refuses everything. Malformed
+text is `NotANumber` whatever its length.
+
+-}
+fromStringWithin : Int -> String -> Result Error BigInt
+fromStringWithin limit text =
+    let
+        parse negative body =
+            if String.startsWith "0x" body || String.startsWith "0X" body then
+                scanDigits 16 negative (String.dropFirst 2 body)
+
+            else if String.startsWith "0b" body || String.startsWith "0B" body then
+                scanDigits 2 negative (String.dropFirst 2 body)
+
+            else if String.startsWith "0o" body || String.startsWith "0O" body then
+                scanDigits 8 negative (String.dropFirst 2 body)
+
+            else
+                scanDigits 10 negative body
+    in
+    withSign parse text
+        |> Result.fromMaybe NotANumber
+        |> Result.andThen (buildWithin limit)
+
+
+{-| [`fromStringWithBase`](#fromStringWithBase) with the same ceiling as
+[`fromStringWithin`](#fromStringWithin): `fromStringWithBaseWithin base limit
+text`. The digits are counted in `base`, so the same limit admits a longer
+number in hexadecimal than in binary.
+
+    BigInt.fromStringWithBaseWithin 16 4 "dead"
+        |> Result.map BigInt.toString
+    --> Ok "57005"
+
+    BigInt.fromStringWithBaseWithin 2 4 "11111"
+    --> Err (BigInt.TooLong { digits = 5, limit = 4 })
+
+A base outside 2 to 36 is `NotANumber`, as it is `Nothing` for the plain
+function.
+
+-}
+fromStringWithBaseWithin : Int -> Int -> String -> Result Error BigInt
+fromStringWithBaseWithin base limit text =
+    withSign (\negative body -> scanDigits base negative body) text
+        |> Result.fromMaybe NotANumber
+        |> Result.andThen (buildWithin limit)
+
+
+{-| The second half of a bounded read: count the digits of a scanned body,
+and either refuse or do the arithmetic.
+-}
+buildWithin : Int -> Scanned -> Result Error BigInt
+buildWithin limit scanned =
+    let
+        count =
+            Basics.max 1 (String.count (trimLeadingZeroes scanned.body))
+    in
+    if count > limit then
+        Err (TooLong { digits = count, limit = limit })
+
+    else
+        Ok (buildDigits scanned)
+
+
+trimLeadingZeroes : String -> String
+trimLeadingZeroes body =
+    if String.startsWith "0" body then
+        trimLeadingZeroes (String.dropFirst 1 body)
+
+    else
+        body
 
 
 {-| Read a number in a base from 2 to 36, with an optional sign and no prefix.
-Underscores are ignored here too.
+Underscores between digits are ignored here too.
 -}
 fromStringWithBase : Int -> String -> Maybe BigInt
 fromStringWithBase base text =
-    withSign (\negative body -> digits base negative body) (String.replace "_" "" text)
+    withSign (\negative body -> digits base negative body) text
 
 
-withSign : (Bool -> String -> Maybe BigInt) -> String -> Maybe BigInt
+withSign : (Bool -> String -> a) -> String -> a
 withSign parse text =
     if String.startsWith "-" text then
         parse True (String.dropFirst 1 text)
@@ -1295,41 +1417,108 @@ withSign parse text =
 
 
 digits : Int -> Bool -> String -> Maybe BigInt
-digits base negative body =
-    if base < 2 || base > 36 || String.isEmpty body then
+digits base negative rawBody =
+    scanDigits base negative rawBody
+        |> Maybe.map buildDigits
+
+
+{-| What a scan of the text leaves: a validated body of digits in the base,
+separators removed, and the sign. No arithmetic has happened yet, so
+producing one of these costs time linear in the text.
+-}
+type alias Scanned =
+    { base : Int, negative : Bool, body : String }
+
+
+scanDigits : Int -> Bool -> String -> Maybe Scanned
+scanDigits base negative rawBody =
+    let
+        body =
+            dropSeparators rawBody
+
+        isDigitOfBase char =
+            when digitValue char is
+                Just digit ->
+                    digit < base
+
+                Nothing ->
+                    False
+    in
+    if base < 2 || base > 36 || String.isEmpty body || not (String.all isDigitOfBase body) then
         Nothing
 
     else
-        let
-            radix =
-                fromInt base
+        Just { base = base, negative = negative, body = body }
 
-            step char acc =
-                when acc is
-                    Nothing ->
-                        Nothing
 
-                    Just total ->
-                        when digitValue char is
-                            Nothing ->
-                                Nothing
+{-| The arithmetic: one multiply-and-add per digit, which is quadratic in the
+length of the body because the running total grows with every step.
+-}
+buildDigits : Scanned -> BigInt
+buildDigits scanned =
+    let
+        radix =
+            fromInt scanned.base
 
-                            Just digit ->
-                                if digit >= base then
-                                    Nothing
+        step char total =
+            add (mul total radix) (fromInt (Maybe.withDefault 0 (digitValue char)))
 
-                                else
-                                    Just (add (mul total radix) (fromInt digit))
-        in
-        String.foldl step (Just zero) body
-            |> Maybe.map
-                (\value ->
-                    if negative then
-                        negate value
+        magnitude =
+            String.foldl step zero scanned.body
+    in
+    if scanned.negative then
+        negate magnitude
 
-                    else
-                        value
-                )
+    else
+        magnitude
+
+
+{-| Remove the underscores that sit between two digits, and only those. An
+underscore anywhere else, including a run of them that touches a sign, a
+prefix or an end of the text, is left in place, and the digit parser rejects
+it.
+
+A run of underscores between two digits counts as one separator, so
+`1__000` reads the same as `1_000`.
+
+-}
+dropSeparators : String -> String
+dropSeparators text =
+    if not (String.contains "_" text) then
+        text
+
+    else
+        dropSeparatorsFrom text
+
+
+dropSeparatorsFrom : String -> String
+dropSeparatorsFrom text =
+    let
+        isDigit char =
+            digitValue char /= Nothing
+
+        step char state =
+            if char == '_' then
+                { state | pending = state.pending + 1 }
+
+            else
+                let
+                    kept =
+                        if state.pending > 0 && state.afterDigit && isDigit char then
+                            ""
+
+                        else
+                            String.repeat state.pending "_"
+                in
+                { pending = 0
+                , afterDigit = isDigit char
+                , out = state.out ++ kept ++ String.fromChar char
+                }
+
+        final =
+            String.foldl step { pending = 0, afterDigit = False, out = "" } text
+    in
+    final.out ++ String.repeat final.pending "_"
 
 
 digitValue : Char -> Maybe Int
@@ -1365,9 +1554,9 @@ toString value =
 when negative. No prefix: `toStringWithBase 16` gives `"ff"`, not `"0xff"`.
 
 A negative number is written with a sign rather than as two's complement, so
-`toStringWithBase 16 (fromInt -255)` is `"-ff"`. For the machine's rendering of
-a 64-bit value, [`maskTo`](#maskTo) first -- which is the whole reason that
-function exists.
+`toStringWithBase 16 (fromInt -255)` is `"-ff"`. If you want the bit pattern
+a machine would show for a 64-bit value, apply [`maskTo`](#maskTo) first; that
+is what it is for.
 
 Anything outside 2 to 36 gives `""`.
 
@@ -1409,8 +1598,8 @@ of them.
 
 Only the bases whose bit width divides 24: two, four, eight and sixteen. That
 divisibility is the property the limb size was chosen for, and this is the
-function that spends it. Base 32 is a power of two and still misses, because
-24 is not divisible by five.
+function that uses it. Base 32 is a power of two and still does not qualify,
+because a digit is five bits and 24 is not divisible by five.
 
 -}
 digitsPerLimb : Int -> Maybe Int
@@ -1435,13 +1624,13 @@ digitsPerLimb base =
 {-| Write a magnitude in a base whose digits divide a limb evenly: each limb
 becomes a fixed run of digits, and the answer is those runs concatenated with
 the most significant limb first. No division, no carries, and nothing that
-depends on the size of the number -- the digits of a limb are already digits of
-the answer, sitting in the right place.
+depends on the size of the number: the digits of a limb are already digits of
+the answer, in the right place.
 
 The top limb is written at whatever width it needs, so the result has no
 leading zeroes. Every limb below it is padded to the full width, because a zero
-*inside* a number is a digit of it. That padding is the whole of the
-correctness here: without it `2^48 + 1` would print as `11`.
+*inside* a number is a digit of it. The padding is what makes this correct:
+without it `2^48 + 1` would print as `11`.
 
 -}
 sliceLimbs : Int -> Int -> Array Int -> String

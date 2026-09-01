@@ -1,8 +1,6 @@
 # gren-bignum
 
-Numbers for [Gren](https://gren-lang.org) that a `Float` cannot hold:
-arbitrary-precision integers with the fixed-width views a programmer actually
-asks for, and exact decimals built on top of them.
+Arbitrary-precision integers and exact decimals for [Gren](https://gren-lang.org).
 
 ```gren
 import BigInt
@@ -18,51 +16,57 @@ BigDecimal.fromString "0.1"
     --> Just "0.3"
 ```
 
-Two modules, and the second is the first with a power of ten attached.
-[`BigInt`](#what-is-in-bigint) is the whole of the arithmetic;
-[`BigDecimal`](#bigdecimal) is a `BigInt` and a scale.
+**TL;DR.** A Gren `Int` is a double, so it is exact up to 2^53 and wrong
+above that, and Gren's `//` operator is wrong far sooner than that. `BigInt`
+is an integer with no upper limit, plus the `uint64`- and `int32`-shaped views
+you need when you are checking what a real machine did. `BigDecimal` is a
+`BigInt` with a decimal point: it adds and multiplies without rounding, and
+rounds only when you tell it to and say how. The implementation is the
+classical algorithms on 24-bit limbs, and section 6 explains why 24.
 
-## Why
+## Table of contents
 
-A Gren `Int` is a double. It is exact to 2^53 and quietly wrong above that,
-which is fine until the day you are working out what a `uint64` did. Then it is
-the whole problem: `2^64 - 1` comes back as `18446744073709552000`, and nothing
-tells you that four digits went missing.
+- [1. Why a Gren program needs this](#1-why-a-gren-program-needs-this)
+- [2. BigInt](#2-bigint)
+- [3. Widths](#3-widths)
+- [4. Argument order](#4-argument-order)
+- [5. BigDecimal](#5-bigdecimal)
+- [6. How it is built](#6-how-it-is-built)
+- [7. Where the techniques come from](#7-where-the-techniques-come-from)
+- [8. Tests](#8-tests)
 
-Division is worse, and it surprised this package into existence. Gren's `//`
-compiles to `(a / b) | 0`, so it truncates its **result** to 32 bits:
+---
+
+## 1. Why a Gren program needs this
+
+Gren has one numeric representation: the JavaScript double. An `Int` is a
+double that happens to hold a whole number, and it stays exact up to 2^53.
+Past that, it rounds. That's fine until you are working out what a `uint64`
+did, and then it is the whole problem: `2^64 - 1` comes back as
+`18446744073709552000`, and nothing tells you that the last four digits are
+wrong.
+
+Division goes wrong much earlier, and that is the bug that started this
+package. Gren's `//` compiles to `(a / b) | 0`, and the `| 0` truncates the
+**result** to 32 bits:
 
 ```gren
-281474976710656 // 2  --> 0          -- 2^48 / 2
+281474976710656 // 2  --> 0            -- 2^48 / 2
 2147483648 // 1       --> -2147483648  -- 2^31
 ```
 
-The operands are fine at any size; it is the **quotient** that has to fit.
-`281474976710656 // 16777216` is correct, because the answer is only 2^24. A
-division is silently wrong exactly when its result lands outside signed 32-bit
-range — including `bigNumber // 1`.
+The operands can be any size. It is the quotient that has to fit in a signed
+32-bit integer. `281474976710656 // 16777216` is correct, because the answer
+is only 2^24, while `bigNumber // 1` is wrong for any `bigNumber` past 2^31.
+We reported this as
+[gren-lang/compiler#383](https://github.com/gren-lang/compiler/issues/383):
+the compiler inlines `//` as `(a / b) | 0`, while core's own kernel code uses
+`Math.trunc`, so the same expression gives two different answers depending on
+whether it was inlined.
 
-Filed as [gren-lang/compiler#383](https://github.com/gren-lang/compiler/issues/383):
-the compiler inlines `//` as `(a / b) | 0` while core's kernel uses
-`Math.trunc`, so the same expression gives two answers depending on whether it
-was inlined.
+---
 
-## Widths, which is the interesting part
-
-A `BigInt` has no width. What it has instead is a way to *ask* for one, so the
-width is a question you put to a value rather than a property the value carries
-and can silently break.
-
-```gren
-x |> BigInt.maskTo 64        -- as a uint64
-x |> BigInt.toSigned 64      -- as an int64
-x |> BigInt.fitsSigned 64    -- would it have overflowed?
-```
-
-`maskTo` wraps the way a register does, so `maskTo 64 (fromInt -1)` is
-`18446744073709551615` and `toSigned 64` of that is `-1` again.
-
-## What is in `BigInt`
+## 2. BigInt
 
 | | |
 |---|---|
@@ -71,141 +75,188 @@ x |> BigInt.fitsSigned 64    -- would it have overflowed?
 | comparison | `compare` `max` `min` `isZero` `isNegative` `isEven` `isOdd` |
 | bits | `and` `or` `xor` `complement` `shiftLeftBy` `shiftRightBy` `bitLength` `popCount` |
 | widths | `maskTo` `toSigned` `fitsSigned` `fitsUnsigned` |
-| text | `fromString` `toString`, and the same with a base from 2 to 36 |
+| text | `fromString` `toString`, the same with a base from 2 to 36, and the `Within` forms of both readers for text you did not write |
 | numbers | `fromInt` `toInt` `fromFloat` `toFloat` |
 
-**Both divisions, because a programmer gets asked both.** `quotRemBy` truncates
-toward zero and its remainder takes the dividend's sign, which is C. `divModBy`
-floors and its modulus takes the divisor's sign, which is Python. `-7 / 2` is
-`-3` remainder `-1` in one and `-4` modulus `1` in the other. Neither is more
-correct; which you want depends on which language you are checking.
+### Two divisions
 
-Each also comes as its two halves — `quotBy` and `remainderBy`, `divBy` and
-`modBy` — because wanting only the quotient is the common case, and paying for
-it with a `Maybe.map .quotient` at every call site reads like an apology:
+There are two divisions because different languages define it differently,
+and you are usually checking one of them. `quotRemBy` truncates toward zero
+and its remainder takes the sign of the dividend; that is C. `divModBy`
+floors and its modulus takes the sign of the divisor; that is Python. So
+`-7 / 2` is `-3` remainder `-1` in the first and `-4` modulus `1` in the
+second. Neither is more correct than the other.
+
+Each division also comes as its two halves, `quotBy` and `remainderBy`,
+`divBy` and `modBy`, because most of the time you only want the quotient:
 
 ```gren
 a |> BigInt.divBy b        -- Maybe BigInt
-a |> BigInt.quotRemBy b    -- Maybe { quotient, remainder }, when you want both
+a |> BigInt.quotRemBy b    -- Maybe { quotient, remainder }
 ```
 
-The pair is still the one to use when you want both, since it does the single
-division that produces them.
+When you want both, use the pair. It does one division and returns both
+parts of it.
 
-**The bitwise operations read a value as two's complement of unbounded width**,
-so `complement (fromInt 5)` is `-6` and `and (fromInt -6) (fromInt 3)` is `2` —
-the same answers Python gives, and the only ones available when nobody has
-declared how wide the number is. `shiftRightBy` is arithmetic: it floors, so
-`-1` shifted right stays `-1`.
+### Bits
 
-**Strings carry a sign, not a two's complement.** `toStringWithBase 16
-(fromInt -255)` is `"-ff"`. For a machine's rendering of a 64-bit value,
-`maskTo 64` first — which is what that function is for. `fromString` takes
-`0x`, `0b` and `0o` prefixes, either case, either sign, and ignores underscores,
-so `0xdead_beef` parses. Anything it does not understand is `Nothing` rather
-than zero.
+The bitwise operations treat a value as two's complement of unbounded width.
+`complement (fromInt 5)` is `-6`, and `and (fromInt -6) (fromInt 3)` is `2`.
+These are the same answers Python gives, and they are the only sensible
+answers when nobody has said how wide the number is. `shiftRightBy` is an
+arithmetic shift, so it floors: `-1` shifted right by any amount is still
+`-1`.
 
-**Floats go in exactly and come out rounded, and only one of those is
-surprising.** `fromFloat` truncates toward zero — `-3.7` is `-3`, not `-4` —
-and `NaN` and the infinities are `Nothing`. What it is not is approximate:
+### Strings
+
+A string carries a sign, not a two's complement. `toStringWithBase 16
+(fromInt -255)` is `"-ff"`. If you want the bit pattern a machine would show
+for a 64-bit value, apply `maskTo 64` first; that is what it is for.
+
+`fromString` accepts `0x`, `0b` and `0o` prefixes in either case, an optional
+sign, and underscores between digits, so `0xdead_beef` parses. Anything it
+does not understand returns `Nothing`, never zero.
+
+`fromStringWithin` is `fromString` for text you did not write. Parsing is
+quadratic in the length of the text, so a million-digit string is a real
+cost, and the plain function will pay it. This one takes a limit on the
+number of digits, refuses anything longer before doing any arithmetic, and
+returns a `Result` so the caller can tell a malformed string from a long one:
+
+```gren
+BigInt.fromStringWithin 20 "123456789012345678901"
+--> Err (BigInt.TooLong { digits = 21, limit = 20 })
+```
+
+`fromStringWithBaseWithin` is the same for `fromStringWithBase`, with the
+digits counted in that base.
+
+### Floats
+
+`fromFloat` truncates toward zero, so `-3.7` becomes `-3`, and `NaN` and the
+infinities return `Nothing`. What it does not do is approximate. It gives you
+the exact integer the double holds:
 
 ```gren
 BigInt.fromFloat 1.0e30 |> Maybe.map BigInt.toString
 --> Just "1000000000000000019884624838656"
 ```
 
-Those digits are not noise. That *is* `1e30` — past a certain exponent a
-double is an integer, just not usually the one you typed, and this is the
-function that shows you which one you actually have.
+Those trailing digits are not noise. Above a certain exponent every double is
+an integer, just not usually the one that was typed, and this is the function
+that shows you which integer you actually have.
 
-`toFloat` is the lossy direction, because a `Float` is the thing with the
-fixed significand:
+`toFloat` is the direction that loses information, because a `Float` has a
+fixed-size significand and a `BigInt` does not:
 
 ```gren
 toFloat (2^64 + 1) == toFloat (2^64)   -- True; the 1 is gone
 toString (2^64 + 1)                    -- "18446744073709551617"; still there
 ```
 
-So a `BigInt` survives a round trip through a `String` and does not survive
-one through a `Float` above 2^53. If you are storing these anywhere, store
-the string. `toInt` is the one that refuses rather than rounds.
+A `BigInt` survives a round trip through a `String` and, above 2^53, does not
+survive one through a `Float`. If you need to store one, store the string.
+`toInt` returns `Nothing` rather than round.
 
-## Argument order
+---
 
-The operations where order matters take their subject **last**, matching
-`Math.modBy`, `Math.remainderBy` and `Bitwise.shiftLeftBy`:
+## 3. Widths
+
+A `BigInt` has no width. Instead, it has a way to ask for one. The width is a
+question you put to a value, not a property the value carries around and can
+silently violate.
 
 ```gren
-a |> BigInt.subBy one          -- a - 1
-a |> BigInt.quotRemBy two      -- a / 2
-a |> BigInt.shiftLeftBy 8      -- a << 8
+x |> BigInt.maskTo 64        -- as a uint64
+x |> BigInt.toSigned 64      -- as an int64
+x |> BigInt.fitsSigned 64    -- would it have overflowed?
 ```
 
-`compare` is the exception, and for the same reason: it stands in for
-`Basics.compare`, so it takes its arguments the way that one does.
+`maskTo` wraps the way a register does: `maskTo 64 (fromInt -1)` is
+`18446744073709551615`, and `toSigned 64` of that is `-1` again.
 
-## BigDecimal
+---
 
-A `Float` cannot hold `0.1`. What it holds instead is
-`0.1000000000000000055511151231257827`, which is close enough right up until
-you add three of them and get `0.30000000000000004`. That is not a bug in the
-addition — base two has no exact `0.1` to add. `BigDecimal` is base ten, so it
+## 4. Argument order
+
+Wherever the order of the operands matters, the subject comes **last**. This
+matches `Math.modBy`, `Math.remainderBy` and `Bitwise.shiftLeftBy` in core,
+and it makes pipelines read naturally:
+
+```gren
+a |> BigInt.subBy one                      -- a - 1
+a |> BigInt.quotRemBy (BigInt.fromInt 2)   -- a / 2
+a |> BigInt.shiftLeftBy 8                  -- a << 8
+```
+
+`compare` is the exception. It stands in for `Basics.compare`, so it takes
+its arguments in the same order that one does.
+
+---
+
+## 5. BigDecimal
+
+A `Float` cannot hold `0.1`. What it holds is
+`0.1000000000000000055511151231257827`, which is close enough until you add
+three of them and get `0.30000000000000004`. The addition is not at fault;
+base two has no exact `0.1` to add. `BigDecimal` works in base ten, so it
 does.
 
 A value is an unscaled `BigInt` and a power of ten: `unscaled * 10^-scale`.
-Nothing about the precision is fixed anywhere, so `add`, `subBy` and `mul`
-never round — they widen. Only division can fail to terminate, and only
-division and `roundTo` take a rounding.
+There is no fixed precision anywhere, so `add`, `subBy` and `mul` never round.
+They widen. The only operation that can fail to terminate is division, and
+division and `roundTo` are the only operations that take a rounding mode.
 
 | | |
 |---|---|
 | arithmetic | `add` `subBy` `mul` `negate` `abs` `powBy` |
-| division | `divBy` exact-or-nothing, `divByTo` to a number of places |
+| division | `divBy` exact or `Nothing`, `divByTo` to a number of places |
 | rounding | `roundTo`, and the seven `Rounding` modes |
 | comparison | `compare` `isZero` `isNegative` `isInteger` `max` `min` |
-| text | `fromString` `toString` `toStringWithPlaces` |
+| text | `fromString` `toString` `toStringWithPlaces`, and `fromStringWithin` for text you did not write |
 | numbers | `fromInt` `toInt` `fromBigInt` `toBigInt` `fromFloat` `toFloat` |
 | representation | `scale` `unscaled` `movePointBy` |
 
 ### One value, one representation
 
-`1.50` and `1.5` are the same number, and here they are also the same value:
-every `BigDecimal` is built through a constructor that strips trailing zeroes.
+`1.50` and `1.5` are the same number, and in this module they are also the
+same value. Every `BigDecimal` goes through a constructor that strips
+trailing zeroes.
 
 ```gren
 BigDecimal.fromString "1.50" == BigDecimal.fromString "1.5"   -- True
 ```
 
-This is the opposite of `java.math.BigDecimal`, where the two are equal in
-value but distinct objects and `equals` says `False`. The reason to differ is
-that Gren's `==` is structural and cannot be overridden. A type whose `==`
-disagrees with its `compare` is a trap laid in the language's most-used
-operator, and no amount of documentation gets it back.
+This is the opposite of `java.math.BigDecimal`, where the two are equal by
+`compareTo` but distinct by `equals`. We differ because Gren's `==` is
+structural and cannot be overridden. A type whose `==` disagrees with its
+`compare` is a trap in the language's most-used operator, and no amount of
+documentation removes it.
 
-What you give up is the scale as a record of significance — a `BigDecimal` does
-not remember that a price was quoted to the cent. Ask for that at the edge,
-where it is a formatting question:
+The cost is that the scale no longer records significance. A `BigDecimal`
+does not remember that a price was quoted to the cent. That is a formatting
+question, and you ask it at the edge:
 
 ```gren
 BigDecimal.toStringWithPlaces 2 price   --> "1.50"
 ```
 
-### Both divisions, again, for a different reason
+### Two divisions, for a different reason
 
-`BigInt` has two divisions because a programmer gets asked both. `BigDecimal`
-has two because a decimal division either comes out or it does not, and which
-of those you can live with is not something a library can decide.
+`BigInt` has two divisions because two languages disagree. `BigDecimal` has
+two because a decimal division either terminates or it does not, and only the
+caller knows which outcome is acceptable.
 
 ```gren
 BigDecimal.one |> BigDecimal.divBy (BigDecimal.fromInt 8)   -- Just 0.125
 BigDecimal.one |> BigDecimal.divBy (BigDecimal.fromInt 3)   -- Nothing
 ```
 
-`divBy` is exact or nothing, and the `Nothing` is worth having: a quotient
-terminates in base ten only when the reduced divisor is made of twos and
-fives, and if you were expecting `1/3` to be a number, you have a bug either
-way. `divByTo` is the one that always answers, because you have told it how
-many places and what to do with the last one.
+`divBy` returns the exact quotient or `Nothing`. A quotient terminates in
+base ten only when the reduced divisor is made of twos and fives, and if your
+program expected `1/3` to come out as a number, the `Nothing` is telling you
+something. `divByTo` always answers, because you have told it how many places
+to keep and what to do with the last one:
 
 ```gren
 BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3)
@@ -214,14 +265,28 @@ BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3
 
 ### The seven roundings
 
-`Up` and `Down` ignore how close the value was; `Ceiling` and `Floor` mind the
-sign of the number; `HalfUp`, `HalfDown` and `HalfEven` all go to the nearer
-value and differ only on an exact tie. They are Python's `decimal` roundings
-under Java's names, and the test suite checks all seven against Python.
+`Up` and `Down` ignore how close the value was to the boundary. `Ceiling` and
+`Floor` depend on the sign of the number. `HalfUp`, `HalfDown` and `HalfEven`
+all go to the nearer value and differ only on an exact tie. These are the
+rounding modes of Python's `decimal` module under Java's names for them, and
+the test suite checks all seven against Python.
 
-`HalfEven` is the default anywhere this module has to round without being
-asked — inside `toStringWithPlaces` — because ties falling both ways is what
-keeps a long column of rounded numbers from drifting upward.
+Where this module has to round without being asked, inside
+`toStringWithPlaces`, it uses `HalfEven`. Splitting ties in both directions
+is what keeps a long column of rounded numbers from drifting upward.
+
+### Reading text you did not write
+
+`fromString` does what it is told, and the exponent makes that a hazard:
+`1e-9999999999` is thirteen characters and needs ten billion digits to hold.
+`fromStringWithin` takes a limit on the number of digits the value would take
+to write out, works that number out from the text alone, and returns
+`Err (TooLong { digits, limit })` before building anything:
+
+```gren
+BigDecimal.fromStringWithin 10 "1e-9999999999"
+--> Err (BigDecimal.TooLong { digits = 10000000000, limit = 10 })
+```
 
 ### The example that makes the case
 
@@ -233,51 +298,79 @@ BigDecimal.fromFloat 2.675 |> Maybe.map (BigDecimal.roundTo 2 BigDecimal.HalfUp)
 --> Just 2.67
 ```
 
-Both are right. The nearest double to `2.675` is `2.67499999999999982...`,
-which is below the tie and rounds down, and every language that rounds a
-`Float` gives `2.67` and gets blamed for its rounding. `fromString` gives the
-number that was written and `fromFloat` gives the number the machine has, and
-the two disagreeing is the whole reason to have a decimal type.
+Both answers are right. The nearest double to `2.675` is
+`2.67499999999999982...`, which is below the tie, so it rounds down. Every
+language that rounds a `Float` gives `2.67` here and gets blamed for it.
+`fromString` gives you the number that was written and `fromFloat` gives you
+the number the machine has, and the fact that those differ is the reason to
+have a decimal type at all.
 
-## How it works
+---
 
-Sign and magnitude: a `Bool` and an array of 24-bit limbs, least significant
-first. A 64-bit value is three of them, and they do not line up with the 64
-bits — the value has no width, which is the point.
+## 6. How it is built
+
+A `BigInt` is a sign and a magnitude: a `Bool` and an array of 24-bit limbs,
+least significant first. A 64-bit value takes three limbs, and the limbs do
+not line up with the 64 bits, because the value has no width.
 
 ```
 0xDEADBEEFCAFEBABE  =  16045690984503098046
 
      limb 2     limb 1     limb 0
     0x00DEAD   0xBEEFCA   0xFEBABE
-      57005    12513738   16693950
+      57005    12513226   16693950
 
 stored as [ 0xFEBABE, 0xBEEFCA, 0x00DEAD ]   -- least significant first
 ```
 
-Little-endian because that is the order the arithmetic wants: limb 0 is where
-addition starts and where a carry comes from, so growing a number is
+Little-endian is the order the arithmetic wants. Limb 0 is where addition
+starts and where the first carry comes from, so growing a number is a
 `pushLast` and never a shift of everything already there.
 
-### Why twenty-four
+### Why 24 bits
 
-Two reasons, and they pull in opposite directions.
+A limb width has a ceiling and a floor, and there is less room between them
+than you might expect.
 
-The first is that a limb times a limb plus a carry has to stay inside what a
-double holds exactly. 24 + 24 = 48, comfortably under 53, so every partial
-product in the multiplication is exact. This is the reason a limb is *small*;
-bn.js gets the same guarantee out of 26 bits and CPython out of 30.
+The ceiling comes from the double. Three places in the arithmetic need a
+value two limbs wide to be exact: the partial product in `mulByLimb`, the
+running `remainder * 2^24 + limb` when dividing by a single limb, and
+Algorithm D's trial quotient, which reads the top two limbs of the remainder
+as one number. Each of those is `2b` bits, so `2b <= 53`, and a limb can be
+at most 26 bits. CPython uses 30, but it can, because it has a `uint64` to
+multiply into. Gren has no such type. [bn.js][bnjs], which works with the
+same doubles Gren has, sits at the ceiling with 26.
 
-The second is what those two extra bits buy. Twenty-four is divisible by 1, 2,
-3 and 4, which is to say:
+The floor comes from base ten. A base that does not divide the limb width is
+printed by repeatedly dividing the number by the largest power of that base
+that fits in one limb, so what a limb width buys decimal conversion is the
+number of digits in that power:
+
+| limb bits | largest power of ten in a limb | two limbs still exact |
+|---|---|---|
+| 23 | 10^6, six digits | yes |
+| **24** | **10^7, seven digits** | **yes** |
+| 25 | 10^7, seven digits | yes |
+| 26 | 10^7, seven digits | yes |
+| 27 | 10^8, eight digits | **no** |
+
+Seven digits per pass is the most a double allows. Eight would need `10^8` to
+fit in a limb, which takes 27 bits, and would need `10^8 * 2^b` to stay exact
+so we can divide by it, which allows at most 26. Those two requirements never
+meet. So 24 is the *smallest* limb that gets the best decimal conversion
+available on this platform, and 25 and 26 spend their extra bits without
+buying decimal a single digit.
+
+That leaves 24, 25 and 26 as equals for the base most people read, and the
+tie is settled by divisibility. Twenty-four is divisible by 1, 2, 3 and 4:
 
 ```
 2^24  =  16^6  =  8^8  =  4^12
 ```
 
 One limb is exactly six hex digits, exactly eight octal digits, exactly
-twenty-four binary ones. So in any of those bases the answer *is* the limbs,
-written out most significant first and padded to width — and that is what
+twenty-four binary digits. In any of those bases the answer *is* the limbs,
+written most significant first and padded to width, and that is what
 `toStringWithBase` does for them:
 
 ```
@@ -288,25 +381,29 @@ written out most significant first and padded to width — and that is what
 ->  1572555756771277535276
 ```
 
-No carries and no division, and nothing that depends on how big the number is:
-a digit of a limb is already a digit of the answer, sitting in the right
-place. The only subtlety is that the top limb is written at its natural width
-and every limb under it is padded to the full six — an interior zero limb is
-six zero digits of the number, and dropping them would print `2^48 + 1` as
-`11`.
+No carries, no division, and nothing that depends on how big the number is: a
+digit of a limb is already a digit of the answer, in the right place. The one
+subtlety is that the top limb is written at its natural width and every limb
+below it is padded to the full six. An interior zero limb is six zero digits
+of the number, and dropping them would print `2^48 + 1` as `11`.
 
-Decimal has no such luck. 10^7 < 2^24 < 10^8, so a limb is somewhere between
-seven and eight decimal digits and never a whole number of them; the carries
-cross limb boundaries, and the number really does have to be divided down.
+Decimal still has to be divided down, since 10^7 < 2^24 < 10^8 means a limb
+is never a whole number of decimal digits and the carries cross limb
+boundaries. But that is the platform's limit, not a price paid for the hex,
+because no limb width a double allows does any better.
 
-For a package whose reason to exist is looking at a value in hex, that is the
-right way to spend two bits.
+What the two bits below the ceiling do cost is general arithmetic. 26-bit
+limbs would mean about 8% fewer limbs, so roughly 15% off a multiplication
+and less off everything linear. Against that, formatting in the four sliced
+bases is the twelvefold difference measured below. And at the sizes this
+package is for, the 15% is theoretical: a 64-bit value is three limbs either
+way, and a 256-bit value is eleven limbs against ten.
 
-### What the other thirty-two bases have to do
+### What the other thirty-one bases have to do
 
-`toStringWithBase` takes the slicing route for 2, 4, 8 and 16, and only those.
-Everything else has to divide: find the largest power of the base that fits in
-a limb, divide the number down by it repeatedly, and pad each remainder.
+`toStringWithBase` slices the limbs for bases 2, 4, 8 and 16, and only those.
+Every other base has to divide: find the largest power of the base that fits
+in a limb, divide the number by it repeatedly, and pad each remainder.
 
 | base | route | digits at a time |
 |---|---|---|
@@ -318,118 +415,121 @@ a limb, divide the number down by it repeatedly, and pad each remainder.
 | 32 | divided by 32^4 | 4 |
 | 36 | divided by 36^4 | 4 |
 
-Base 32 is the one that looks like it should qualify and does not: it is a
-power of two, but a digit is five bits and 24 is not divisible by five, so its
-digits straddle limb boundaries like any other base's.
+Base 32 looks like it should qualify and does not. It is a power of two, but
+a digit is five bits and 24 is not divisible by five, so its digits straddle
+limb boundaries like any other base's.
 
-The difference is not small, because dividing the number down is quadratic —
-each chunk walks every limb — and slicing is linear. Formatting an 8192-bit
-number in hex three hundred times:
+The difference is not small. Dividing the number down is quadratic, because
+each chunk of digits walks every limb, and slicing is linear. Formatting an
+8192-bit number in hex three hundred times:
 
 ```
 divided:  477 ms
 sliced:    38 ms
 ```
 
-Both give the same string. The round-trip test writes and re-reads every one
-of the eleven sample values in all thirty-five bases, so the two routes are
-held to the same answers.
+Both routes give the same string. The round-trip test writes and re-reads
+each of the eleven sample values in all thirty-five bases, so the two routes
+are held to the same answers.
 
 ### The arithmetic
 
-Multiplication is long multiplication a row at a time. Division is Knuth's
+Multiplication is long multiplication, one row at a time. Division is Knuth's
 Algorithm D, written as a fold rather than as mutation of a scratch buffer,
 with both operands normalised first so the trial quotient is never more than
 two too high.
 
-### And the decimals on top
+### The decimals on top
 
-`BigDecimal` adds nothing to that. It is a `BigInt` and an `Int` scale, and
-every operation is a scale adjustment and then the integer operation: `add`
-widens both to the finer scale, `mul` adds the scales, and the roundings are a
-single truncating division with one conditional step away from zero. The only
-piece with any arithmetic of its own is the test for whether an exact division
-terminates, and that turns out to need no greatest common divisor: writing the
-divisor as `2^a * 5^b * m`, the quotient `n / d` terminates exactly when
-`d` divides `n * 10^k` for `k = max a b`, so asking for that one division both
-tests the question and produces the digits.
+`BigDecimal` adds no arithmetic of its own. It is a `BigInt` and an `Int`
+scale, and every operation is a scale adjustment followed by the integer
+operation: `add` widens both operands to the finer scale, `mul` adds the
+scales, and each rounding is one truncating division plus a conditional step
+away from zero. The one piece with any reasoning in it is the test for
+whether an exact division terminates, and it turns out not to need a greatest
+common divisor. Write the divisor as `2^a * 5^b * m`; then `n / d`
+terminates exactly when `d` divides `n * 10^k` for `k = max a b`. Asking for
+that one division both answers the question and produces the digits.
 
-## Where the technique comes from
+---
 
-None of the arithmetic here is original, and the parts of it that look clever
-are sixty years old. Since this is the sort of thing that gets mistaken for
-invention, here is who it actually belongs to.
+## 7. Where the techniques come from
+
+None of the arithmetic here is original, and the parts that look clever are
+sixty years old. This section says who it belongs to.
 
 **Limbs smaller than the machine's exact range** is the standard way to build
 multi-precision arithmetic on a numeric type that cannot detect its own
-overflow. Knuth sets out the classical algorithms for an arbitrary radix *b* in
-*The Art of Computer Programming*, Vol. 2, §4.3.1 — Algorithm A (addition),
-S (subtraction), M (multiplication) and D (division) — and every operation in
-this package is one of those four. The division is Algorithm D as given there,
+overflow. Knuth gives the classical algorithms for an arbitrary radix *b* in
+*The Art of Computer Programming*, Vol. 2, §4.3.1: Algorithm A (addition), S
+(subtraction), M (multiplication) and D (division). Every operation in this
+package is one of those four. The division is Algorithm D as given there,
 including the normalisation step and the result that a trial quotient formed
-from the leading digits is then never more than two too large. The `correct`
-loop in the source exists because of that bound, and would be unbounded
-without it.
+from the leading digits is never more than two too large. The `correct` loop
+in the source exists because of that bound, and would be unbounded without
+it.
 
-**Choosing the radix below the word size** is what every implementation on a
-platform with no double-width integer type does. CPython stores 30-bit digits
+**Choosing the radix below the word size** is what every implementation does
+on a platform with no double-width integer type. CPython stores 30-bit digits
 in a 32-bit type so that a product fits the `twodigits` type it multiplies
-into; [bn.js][bnjs], working with exactly the doubles Gren has, uses 26-bit
-limbs, because 26 + 26 = 52 fits inside a double's 53-bit significand. The
-reasoning behind 24 here is theirs, not ours.
+into. [bn.js][bnjs], on the same doubles Gren has, uses 26-bit limbs, because
+26 + 26 = 52 fits inside a double's 53-bit significand. The reasoning behind
+24 here is theirs.
 
-**What is local to this package is the number itself, and it is a trade rather
-than an idea.** 26 bits would give more room per limb. 24 gives two of those
-bits up to buy a different property: it is divisible by 1, 2, 3 and 4, so
-binary, octal and hexadecimal all land on limb boundaries, and formatting in
-them is slicing instead of repeated division. For a package whose reason to
-exist is looking at values in hex, that is the right way round — but it is a
-choice among standard ones, not a new one.
+**What is local to this package is the particular number**, and it is a pick
+within a range rather than an idea. A double allows at most 26 bits, and base
+ten gets the best conversion available (seven digits a pass) from 24 up, so
+as far as decimal is concerned 24, 25 and 26 are equals. Of those, 24 is the
+one divisible by 1, 2, 3 and 4, so binary, octal and hexadecimal land on limb
+boundaries and formatting in them is slicing rather than repeated division.
+The two bits it gives up cost about 15% of a multiplication and nothing of a
+decimal conversion. Even so, it is a choice among standard options, not a new
+one.
 
 **The decimal representation is not ours either.** An unscaled integer and a
 decimal exponent is what `java.math.BigDecimal` is, what Python's `decimal`
 module is, and what IEEE 754-2008 standardised as a decimal format. The seven
-roundings are that standard's, under Java's names for them. The one choice
-made here rather than inherited is stripping trailing zeroes so that `==` is
-numeric equality, and that is a concession to Gren's structural equality
-rather than a better idea — Java keeps the scale and can afford to, because it
-has an `equals` it is allowed to write itself.
+roundings are that standard's, under Java's names. The one choice made here
+rather than inherited is stripping trailing zeroes so that `==` is numeric
+equality, and that is a concession to Gren's structural equality rather than
+an improvement. Java keeps the scale and can afford to, because it gets to
+write its own `equals`.
 
 ### References
 
 - Donald E. Knuth, *The Art of Computer Programming*, Vol. 2: *Seminumerical
   Algorithms*, §4.3.1 "The Classical Algorithms".
-- CPython, [`Include/cpython/longintrepr.h`][cpython] — 30-bit digits, and the
+- CPython, [`Include/cpython/longintrepr.h`][cpython]: 30-bit digits, and the
   constraints on `PyLong_SHIFT` that decide them.
-- [bn.js][bnjs] — 26-bit limbs, the same trade on the same doubles.
-- IEEE 754-2008, §3.5 — decimal formats as a significand and an exponent, and
+- [bn.js][bnjs]: 26-bit limbs, the same trade on the same doubles.
+- IEEE 754-2008, §3.5: decimal formats as a significand and an exponent, and
   the rounding-direction attributes.
-- Python's [`decimal`][pydecimal] module — the implementation the `Decimals`
-  suite checks against.
+- Python's [`decimal`][pydecimal] module, which the `Decimals` suite checks
+  against.
 
 [pydecimal]: https://docs.python.org/3/library/decimal.html
-
 [cpython]: https://github.com/python/cpython/blob/main/Include/cpython/longintrepr.h
 [bnjs]: https://github.com/indutny/bn.js/
 
-## Tests
+---
+
+## 8. Tests
 
 ```sh
 cd tests && ./run.sh
 ```
 
-Five kinds, in the order they catch things:
+Five suites, in the order they catch things:
 
-- **Differential** runs every operation twice — once through `BigInt`, once
-  through Gren's own `Int` — over every pair in −24…24 and over pairs
+- **Differential** runs every operation twice, once through `BigInt` and once
+  through Gren's own `Int`, over every pair in −24…24 and over pairs
   straddling the 2^24 limb boundary. Anything an `Int` can check, it checks.
-- **BigNumbers** picks up past 2^53, where the point of the package is, against
-  values from an independent implementation.
+- **BigNumbers** picks up past 2^53, where the point of the package is,
+  against values from an independent implementation.
 - **Bits** covers the two's-complement reading of negatives and the width
   views, against what Python gives for the same expressions.
 - **Strings** covers parsing and formatting in every base from 2 to 36,
-  including the refusals.
+  including the inputs that must be refused.
 - **Decimals** covers `BigDecimal`: the normal form that makes `==` numeric
-  equality, arithmetic a `Float` gets visibly wrong, and all seven roundings on
-  the ties where they disagree — against Python's `decimal`, which is the same
-  idea implemented by people who had to get it right.
+  equality, arithmetic a `Float` gets visibly wrong, and all seven roundings
+  on the ties where they disagree, against Python's `decimal`.

@@ -1,5 +1,6 @@
 module BigDecimal exposing
     ( BigDecimal
+    , Error(..)
     , Rounding(..)
     , abs
     , add
@@ -10,6 +11,7 @@ module BigDecimal exposing
     , fromFloat
     , fromInt
     , fromString
+    , fromStringWithin
     , isInteger
     , isNegative
     , isZero
@@ -32,44 +34,45 @@ module BigDecimal exposing
     , zero
     )
 
-{-| Exact decimal numbers: the ones a person wrote down, arithmetic that keeps
-every digit of them, and a rounding you have to ask for by name.
+{-| Exact decimal numbers: the numbers a person wrote down, arithmetic that
+keeps every digit of them, and rounding only when you ask for it by name.
 
-A `Float` cannot hold `0.1`. What it holds instead is
-`0.1000000000000000055511151231257827`, which is close enough until the day
-you add three of them and get `0.30000000000000004`. That is not a bug in the
-addition; it is that base two has no exact `0.1` to add. A `BigDecimal` is
-base ten, so it does:
+A `Float` cannot hold `0.1`. What it holds is
+`0.1000000000000000055511151231257827`, which is close enough until you add
+three of them and get `0.30000000000000004`. The addition is not at fault;
+base two has no exact `0.1` to add. A `BigDecimal` works in base ten, so it
+does:
 
     BigDecimal.fromString "0.1"
         |> Maybe.map (\d -> BigDecimal.add d d |> BigDecimal.add d)
         |> Maybe.map BigDecimal.toString
     --> Just "0.3"
 
-A value is a [`BigInt`](BigInt) and a power of ten: `unscaled * 10^-scale`. So
-the precision is not fixed anywhere, and `add`, `subBy` and `mul` never round
--- they widen. Only division can fail to terminate, and only division and
-[`roundTo`](#roundTo) take a [`Rounding`](#Rounding).
+A value is a [`BigInt`](BigInt) and a power of ten: `unscaled * 10^-scale`.
+There is no fixed precision anywhere, so `add`, `subBy` and `mul` never round.
+They widen. The only operation that can fail to terminate is division, and
+division and [`roundTo`](#roundTo) are the only operations that take a
+[`Rounding`](#Rounding).
 
 
 ## One value, one representation
 
-`1.50` and `1.5` are the same number, and here they are also the same value:
-every `BigDecimal` is built through a constructor that strips trailing zeroes,
-so `==` means what it says.
+`1.50` and `1.5` are the same number, and in this module they are also the
+same value. Every `BigDecimal` goes through a constructor that strips trailing
+zeroes, so `==` is numeric equality.
 
     BigDecimal.fromString "1.50" == BigDecimal.fromString "1.5"
     --> True
 
-That is the opposite of `java.math.BigDecimal`, where the two are equal in
-value but distinct objects and `equals` says `False`. The reason to differ is
-that Gren's `==` is structural and cannot be overridden: a type whose `==`
-disagrees with its `compare` is a trap laid in the language's most-used
-operator, and no amount of documentation gets it back.
+This is the opposite of `java.math.BigDecimal`, where the two are equal by
+`compareTo` but distinct by `equals`. We differ because Gren's `==` is
+structural and cannot be overridden. A type whose `==` disagrees with its
+`compare` is a trap in the language's most-used operator, and no amount of
+documentation removes it.
 
-What you give up is the scale as a record of significance -- a `BigDecimal`
-does not remember that a price was quoted to the cent. Ask for that at the
-edge, where it is a formatting question:
+The cost is that the scale no longer records significance. A `BigDecimal`
+does not remember that a price was quoted to the cent. That is a formatting
+question, and you ask it at the edge:
 
     BigDecimal.toStringWithPlaces 2 price --> "1.50"
 
@@ -86,6 +89,11 @@ edge, where it is a formatting question:
 @docs fromString, toString, toStringWithPlaces
 
 
+## Reading text you did not write
+
+@docs fromStringWithin, Error
+
+
 ## Arithmetic
 
 @docs add, subBy, mul, negate, abs, powBy
@@ -93,8 +101,8 @@ edge, where it is a formatting question:
 
 ## Dividing
 
-Two of them, because a decimal division either comes out or it does not, and
-which of those you can live with is not something this module can decide.
+There are two, because a decimal division either terminates or it does not,
+and only the caller knows which outcome is acceptable.
 
 @docs divBy, divByTo
 
@@ -116,8 +124,8 @@ which of those you can live with is not something this module can decide.
 
 ## A note on argument order
 
-As in [`BigInt`](BigInt), the operations where order matters take their
-subject **last**:
+As in [`BigInt`](BigInt), wherever the order of the operands matters, the
+subject comes **last**:
 
     a |> BigDecimal.subBy one -- a - 1
 
@@ -128,6 +136,7 @@ subject **last**:
 -}
 
 import BigInt exposing (BigInt)
+import Char
 import Math
 import Maybe exposing (Maybe(..))
 import String
@@ -139,14 +148,13 @@ import String
 {-| A number of the form `unscaled * 10^-scale`.
 
 The unscaled value is a [`BigInt`](BigInt) and carries the sign, so there is no
-size limit on the digits. The scale is an ordinary `Int` and may be negative --
+size limit on the digits. The scale is an ordinary `Int` and may be negative:
 `100` is stored as `1` with a scale of `-2`, because that is what stripping
 trailing zeroes leaves.
 
 Every value is built through a constructor that does that stripping, which is
 what makes `==` numeric equality. Zero is `unscaled = 0, scale = 0` and nothing
-else, so `x |> subBy x == BigDecimal.zero` is a fair test rather than an
-accident.
+else, so `x |> subBy x == BigDecimal.zero` is a reliable test.
 
 -}
 type BigDecimal
@@ -158,10 +166,11 @@ type BigDecimal
 
 {-| Zero.
 
-The one zero there is: a zero unscaled value is always given a scale of zero,
-so `0.00` and `0` and `0e-40` are all this.
+There is only one zero: a zero unscaled value is always given a scale of
+zero, so `0.00` and `0` and `0e-40` are all this value.
 
-It is also the divisor that makes every division here `Nothing`.
+It is also the divisor that makes every division in this module return
+`Nothing`.
 
 -}
 zero : BigDecimal
@@ -179,12 +188,12 @@ one =
     BigDecimal { unscaled = BigInt.one, scale = 0 }
 
 
-{-| Build a value from an unscaled `BigInt` and a scale, putting it in the one
-form it is allowed to have: trailing zeroes stripped off the unscaled value and
-paid for out of the scale, and a zero unscaled value given a scale of zero.
+{-| Build a value from an unscaled `BigInt` and a scale, normalising it:
+trailing zeroes are stripped from the unscaled value and the scale is reduced
+to match, and a zero unscaled value is given a scale of zero.
 
-Everything in this module ends here, which is the whole basis for `==` meaning
-numeric equality.
+Every value in this module is built here, which is what makes `==` numeric
+equality.
 
 -}
 make : BigInt -> Int -> BigDecimal
@@ -196,12 +205,12 @@ make value places =
         stripChunks value places
 
 
-{-| Ten to the seven: the largest power of ten below `BigInt`'s 2^24 limb, so
-dividing by it takes that module's single-limb path.
+{-| 10^7, the largest power of ten that fits in one of `BigInt`'s 24-bit
+limbs, so dividing by it takes that module's single-limb path.
 
-Stripping seven zeroes at a time and only then falling back to one at a time
-matters for the values that have a lot of them -- `powBy 100 (fromInt 10)`
-arrives here with a hundred to remove.
+Stripping seven zeroes at a time before falling back to one at a time matters
+for values that have many of them: `powBy 100 (fromInt 10)` arrives here with
+a hundred to remove.
 
 -}
 chunkOfTens : BigInt
@@ -273,8 +282,8 @@ at target value =
 
 
 {-| An ordinary `Int`, which is a whole number and so has a scale of zero or
-less. Above 2^53 an `Int` is already inexact, so this is faithful to the double
-you handed over rather than to the number you meant.
+less. Above 2^53 an `Int` is already inexact, so this converts the double you
+passed, not the number you meant.
 -}
 fromInt : Int -> BigDecimal
 fromInt n =
@@ -283,9 +292,10 @@ fromInt n =
 
 {-| Back to an `Int`, when it is a whole number and fits in one exactly.
 
-Two ways to get `Nothing`, and they are both refusals rather than roundings:
-there is a fractional part, or the whole part is past `Math.maxSafeInteger`.
-[`roundTo`](#roundTo) `0` first if you meant to discard the fraction.
+There are two ways to get `Nothing`, and both are refusals rather than
+roundings: there is a fractional part, or the whole part is past
+`Math.maxSafeInteger`. Apply [`roundTo`](#roundTo) `0` first if you meant to
+discard the fraction.
 
     BigDecimal.fromString "2.5" |> Maybe.andThen BigDecimal.toInt
     --> Nothing
@@ -307,14 +317,14 @@ fromBigInt value =
     make value 0
 
 
-{-| The whole part, truncated toward zero -- so `-3.7` is `-3`, the same
+{-| The whole part, truncated toward zero: `-3.7` becomes `-3`, the same
 direction `BigInt.fromFloat` and [`Down`](#Rounding) go.
 
     BigDecimal.fromString "-3.7" |> Maybe.map BigDecimal.toBigInt
     --> Just (BigInt.fromInt -3)
 
-For the other directions, [`roundTo`](#roundTo) `0` with the rounding you want
-and then come here.
+For any other direction, apply [`roundTo`](#roundTo) `0` with the rounding you
+want first.
 
 -}
 toBigInt : BigDecimal -> BigInt
@@ -328,20 +338,20 @@ toBigInt (BigDecimal value) =
             |> Maybe.withDefault BigInt.zero
 
 
-{-| The **exact** value of a `Float`, which is almost never the number that was
-typed to produce it. `NaN` and the infinities are `Nothing`; everything else
-converts, because every finite double is exactly some integer over a power of
-two, and a power of two is a terminating decimal.
+{-| The **exact** value of a `Float`, which is almost never the number that
+was typed to produce it. `NaN` and the infinities are `Nothing`. Everything
+else converts, because every finite double is an integer over a power of two,
+and a power of two is a terminating decimal.
 
     BigDecimal.fromFloat 0.1 |> Maybe.map BigDecimal.toString
     --> Just "0.1000000000000000055511151231257827021181583404541015625"
 
-Those digits are not noise on the end of `0.1`. That *is* the double, all of
-it, and this is the function that shows it to you -- the same job
-`BigInt.fromFloat` does for `1.0e30`.
+Those digits are not noise. That is the whole of the double, and this is the
+function that shows it to you, the same job `BigInt.fromFloat` does for
+`1.0e30`.
 
-Which is exactly why it is the wrong door for a number a person wrote.
-[`fromString`](#fromString) is that one:
+That is also why this is the wrong function for a number a person wrote.
+[`fromString`](#fromString) is the one for that:
 
     BigDecimal.fromString "0.1" |> Maybe.map BigDecimal.toString
     --> Just "0.1"
@@ -378,13 +388,13 @@ fromFloat f =
                 )
 
 
-{-| To a `Float`, rounding to the nearest one -- which is the whole of what a
-`Float` can do, and the reason this module exists.
+{-| To a `Float`, rounding to the nearest one. Rounding is all a `Float` can
+do, and it is the reason this module exists.
 
-Past a double's range the answer is an infinity rather than a `Nothing`,
-because that is what the arithmetic would have given anyway.
-[`toString`](#toString) is the direction that never loses a digit, and
-[`toInt`](#toInt) is the one that refuses.
+Past a double's range the answer is an infinity rather than `Nothing`, because
+that is what the arithmetic would have given anyway. [`toString`](#toString)
+is the direction that never loses a digit, and [`toInt`](#toInt) is the
+conversion that refuses.
 
 -}
 toFloat : BigDecimal -> Float
@@ -401,7 +411,7 @@ positive count moves it right.
     BigDecimal.fromString "1.5" |> Maybe.map (BigDecimal.movePointBy 2)
     --> BigDecimal.fromString "150"
 
-Free at any size, because only the scale changes.
+This costs nothing at any size, because only the scale changes.
 
 -}
 movePointBy : Int -> BigDecimal -> BigDecimal
@@ -445,8 +455,8 @@ unscaled (BigDecimal value) =
 {-| Add, exactly. The answer is carried at the finer of the two scales, which
 is the one that loses nothing.
 
-No `By` suffix, unlike [`subBy`](#subBy), because addition is commutative and
-so there is no subject for the pipeline to favour.
+No `By` suffix, unlike [`subBy`](#subBy), because addition is commutative, so
+there is no subject for a pipeline to put last.
 
 -}
 add : BigDecimal -> BigDecimal -> BigDecimal
@@ -470,9 +480,8 @@ subBy b a =
 
 {-| Multiply, exactly. Commutative, so no `By`.
 
-A product of decimals always terminates -- the scales simply add, and the
-digits are a `BigInt` multiplication -- so this is the operation where exact
-decimal arithmetic costs nothing to insist on.
+A product of decimals always terminates: the scales add, and the digits are a
+`BigInt` multiplication. Exactness costs nothing here.
 
 -}
 mul : BigDecimal -> BigDecimal -> BigDecimal
@@ -483,7 +492,7 @@ mul (BigDecimal a) (BigDecimal b) =
 {-| Flip the sign. The scale is untouched, so no arithmetic happens here at any
 size.
 
-`negate zero` is `zero`; there is no negative zero to be had.
+`negate zero` is `zero`; there is no negative zero.
 
 -}
 negate : BigDecimal -> BigDecimal
@@ -500,18 +509,18 @@ abs (BigDecimal value) =
 
 
 {-| Raise to a power: `powBy exponent base`. A non-negative exponent is exact
-however many digits it takes -- the unscaled value goes through
-`BigInt.powBy` and the scale is multiplied.
+however many digits it takes: the unscaled value goes through `BigInt.powBy`
+and the scale is multiplied.
 
     BigDecimal.fromString "1.05" |> Maybe.map (BigDecimal.powBy 10)
     --> BigDecimal.fromString "1.62889462677744140625"
 
 A negative exponent is a reciprocal, and a reciprocal usually does not
-terminate. This gives the exact answer when there is one -- `powBy -3
-(fromInt 2)` is `0.125` -- and `zero` when there is not, which is the same
-shape of answer `BigInt.powBy` gives a negative exponent and comes with the
-same warning: if `3 ^ -1` should be `0.333...` rather than nothing, the
-function that will say so is [`divByTo`](#divByTo).
+terminate. This gives the exact answer when there is one (`powBy -3
+(fromInt 2)` is `0.125`) and `zero` when there is not. That is the same shape
+of answer `BigInt.powBy` gives a negative exponent, and it comes with the same
+warning: if `3 ^ -1` should be `0.333...` rather than nothing,
+[`divByTo`](#divByTo) is the function that will say so.
 
 -}
 powBy : Int -> BigDecimal -> BigDecimal
@@ -530,11 +539,11 @@ powBy exponent (BigDecimal base) =
 
 {-| Divide exactly, or not at all: `divBy divisor dividend`.
 
-`Nothing` for two reasons, and the type does not distinguish them: the divisor
-was zero, or the quotient does not terminate in base ten. The second happens
-whenever the divisor keeps a prime factor other than two or five after the
-common factors cancel, so [`isZero`](#isZero) on the divisor is how you tell
-the two apart when it matters.
+There are two reasons for `Nothing`, and the type does not distinguish them:
+the divisor was zero, or the quotient does not terminate in base ten. The
+second happens whenever the divisor keeps a prime factor other than two or
+five after the common factors cancel, so [`isZero`](#isZero) on the divisor is
+how you tell the two apart when it matters.
 
     -- 1 / 8 is 0.125, and stops
     BigDecimal.one |> BigDecimal.divBy (BigDecimal.fromInt 8)
@@ -544,8 +553,8 @@ the two apart when it matters.
     BigDecimal.one |> BigDecimal.divBy (BigDecimal.fromInt 3)
     --> Nothing
 
-Use this when a wrong answer is worse than no answer -- splitting a total,
-converting a unit -- and [`divByTo`](#divByTo) when you have a number of places
+Use this when a wrong answer is worse than no answer (splitting a total,
+converting a unit), and [`divByTo`](#divByTo) when you have a number of places
 in mind and are willing to say so.
 
 -}
@@ -578,8 +587,8 @@ divBy (BigDecimal divisor) (BigDecimal dividend) =
 
 Write the divisor as `2^a * 5^b * m` with `m` coprime to ten. Then
 `n * 10^k / d` is a whole number for `k = max a b` exactly when `m` divides
-`n` -- which is the same condition as the quotient terminating, and is why
-this needs no greatest common divisor to find.
+`n`, which is the same condition as the quotient terminating. That is why no
+greatest common divisor is needed.
 
 -}
 terminatingShift : BigInt -> Int
@@ -621,11 +630,11 @@ zero divisor.
         |> Maybe.map BigDecimal.toString
     --> Just "0.33333"
 
-`places` is decimal places, not significant digits, and it may be negative --
+`places` is decimal places, not significant digits, and it may be negative:
 `divByTo -3 HalfUp` gives an answer to the nearest thousand. Trailing zeroes
 still come off afterwards, so a result that lands on `0.25` is `0.25` and not
-`0.25000`; ask [`toStringWithPlaces`](#toStringWithPlaces) if the zeroes are
-the point.
+`0.25000`; use [`toStringWithPlaces`](#toStringWithPlaces) if you need the
+zeroes.
 
 -}
 divByTo : Int -> Rounding -> BigDecimal -> BigDecimal -> Maybe BigDecimal
@@ -667,23 +676,23 @@ divByTo places rounding (BigDecimal divisor) (BigDecimal dividend) =
 Seven of them, in three groups. The first two say which way to go regardless
 of how close the value was:
 
-  - `Up` -- away from zero. `2.4` and `2.6` both become `3`.
-  - `Down` -- toward zero, which is truncation. `2.4` and `2.6` both become
+  - `Up`: away from zero. `2.4` and `2.6` both become `3`.
+  - `Down`: toward zero, which is truncation. `2.4` and `2.6` both become
     `2`, and `-2.6` becomes `-2`.
 
-The next two ignore the sign of the distance and mind the sign of the number:
+The next two depend on the sign of the number rather than on how close it was:
 
-  - `Ceiling` -- toward positive infinity. `-2.6` becomes `-2`.
-  - `Floor` -- toward negative infinity. `-2.4` becomes `-3`.
+  - `Ceiling`: toward positive infinity. `-2.6` becomes `-2`.
+  - `Floor`: toward negative infinity. `-2.4` becomes `-3`.
 
 The last three all go to the nearer value and differ only on an exact tie:
 
-  - `HalfUp` -- ties away from zero. `2.5` becomes `3`. This is the rounding
+  - `HalfUp`: ties away from zero. `2.5` becomes `3`. This is the rounding
     taught in school, and the one most people mean.
-  - `HalfDown` -- ties toward zero. `2.5` becomes `2`.
-  - `HalfEven` -- ties to the even neighbour. `2.5` becomes `2` and `3.5`
+  - `HalfDown`: ties toward zero. `2.5` becomes `2`.
+  - `HalfEven`: ties to the even neighbour. `2.5` becomes `2` and `3.5`
     becomes `4`. Ties fall both ways instead of always up, so a long column of
-    rounded numbers does not drift; this is banker's rounding, and it is what
+    rounded numbers does not drift. This is banker's rounding, and it is what
     IEEE 754 does by default.
 
 -}
@@ -704,14 +713,14 @@ type Rounding
         |> Maybe.map BigDecimal.toString
     --> Just "2.68"
 
-That example is the one a `Float` gets wrong, and not because of the rounding:
-the nearest double to `2.675` is a hair *below* it, so rounding that gives
-`2.67`. Here the value is `2.675` and the tie is a real tie.
+That is the example a `Float` gets wrong, and not because of the rounding:
+the nearest double to `2.675` is slightly *below* it, so rounding that gives
+`2.67`. Here the value is exactly `2.675` and the tie is a real tie.
 
 Places may be negative, which rounds to tens or hundreds. Rounding to more
-places than a number has does nothing at all -- there are no trailing zeroes
-to add, since a value never carries any. [`toStringWithPlaces`](#toStringWithPlaces)
-is where padding lives.
+places than a number has does nothing at all. There are no trailing zeroes to
+add, because a value never carries any;
+[`toStringWithPlaces`](#toStringWithPlaces) is where padding lives.
 
 -}
 roundTo : Int -> Rounding -> BigDecimal -> BigDecimal
@@ -865,9 +874,9 @@ isNegative (BigDecimal value) =
 
 {-| Whether there is nothing after the point.
 
-A scale of zero or less is the whole test, and that is only a fair test because
-of normalisation: a value that ends in a zero has already had it removed, so
-`1.50` arrives here as `1.5` and `2.00` as `2`.
+The test is simply whether the scale is zero or less, and that only works
+because of normalisation: a value that ends in a zero has already had it
+removed, so `1.50` arrives here as `1.5` and `2.00` as `2`.
 
     BigDecimal.fromString "2.00" |> Maybe.map BigDecimal.isInteger
     --> Just True
@@ -912,44 +921,151 @@ somewhere among them, and an optional `e` exponent.
     BigDecimal.fromString "1.5e3" |> Maybe.map BigDecimal.toString
     --> Just "1500"
 
-Underscores are ignored wherever they fall, as in `BigInt.fromString`, so
-`1_000.000_1` parses. Unlike that function there are no `0x`, `0b` or `0o`
-prefixes: a hexadecimal fraction is not a thing anybody was asking for, and
-`0x1` would be ambiguous with a `0` followed by an exponent in some other
-base.
+The `e` may be either case and the exponent may carry its own sign, so
+`1.5E-3` is `0.0015` and `1e+5` is `100000`. The exponent is not bounded:
+`1e-9999999999` is accepted, and would take ten billion digits to write. For
+text you did not write, [`fromStringWithin`](#fromStringWithin) refuses that
+before building it. [`toString`](#toString) never writes an exponent back
+out; `1e-9` comes back as `0.000000001`.
 
-Anything else is `Nothing` rather than zero -- no digits at all, a second
+An underscore between two digits is ignored, as in `BigInt.fromString`, so
+`1_000.000_1` parses. One anywhere else, next to the point, the sign or the
+`e`, makes the whole string `Nothing`. Unlike that function there are no
+`0x`, `0b` or `0o` prefixes; a hexadecimal fraction is not something anyone
+needs.
+
+Anything else is `Nothing` rather than zero: no digits at all, a second
 point, an `e` with nothing after it, a trailing unit:
 
     BigDecimal.fromString "1.2.3" --> Nothing
 
     BigDecimal.fromString "3 apples" --> Nothing
 
-This is the door for a number a person wrote down. [`fromFloat`](#fromFloat) is
-the one that tells you what a double is really holding, which is a different
-question.
+The point is always `.` and there is no grouping separator but `_`, as in a
+Gren literal. A comma is not a digit, so `1,234.56` and `1.234,56` are both
+`Nothing`. That is deliberate: `1,234` is a thousand in one country and a bit
+over one in another, and no parser can tell from the text alone. Normalise a
+localised string before it gets here, where the locale is known:
+
+    german text =
+        text
+            |> String.replace "." ""
+            |> String.replace "," "."
+            |> BigDecimal.fromString
+
+    -- "1.234,56" --> Just 1234.56
+
+The same two replacements cover most of Europe. Grouping varies more than the
+decimal separator does: French writes `1 234,56` with a space or a narrow
+no-break space, Swiss German writes `1'234.56`, and Indian English groups
+unevenly as `12,34,567.89`. Strip whatever the locale groups with, swap its
+decimal separator for `.`, and this function does the rest.
+
+This is the function for a number a person wrote down.
+[`fromFloat`](#fromFloat) tells you what a double is really holding, which is
+a different question.
 
 -}
 fromString : String -> Maybe BigDecimal
 fromString text =
-    when String.split "e" (String.toLower (String.replace "_" "" text)) is
-        [ mantissa ] ->
-            mantissaOf mantissa 0
+    scan text
+        |> Maybe.map build
 
-        [ mantissa, exponent ] ->
-            String.toInt exponent
-                |> Maybe.andThen (mantissaOf mantissa)
 
-        _ ->
-            Nothing
+{-| Why [`fromStringWithin`](#fromStringWithin) refused.
+
+`NotANumber` is everything the plain [`fromString`](#fromString) returns
+`Nothing` for. `TooLong` is a well-formed number that would take more digits
+to write out than the limit allows, and it says how many.
+
+-}
+type Error
+    = NotANumber
+    | TooLong { digits : Int, limit : Int }
+
+
+{-| [`fromString`](#fromString) with a ceiling on how many digits the number
+takes to write out, for text that comes from somewhere you do not control:
+`fromStringWithin limit text`.
+
+The exponent is the hazard. `1e-9999999999` is thirteen characters and a
+perfectly small number, and it needs ten billion digits to hold. The plain
+`fromString` will try. This one works out from the text alone how many
+digits [`toString`](#toString) would have to write, and refuses before
+building anything if that is more than the limit:
+
+    BigDecimal.fromStringWithin 10 "0.00123"
+        |> Result.map BigDecimal.toString
+    --> Ok "0.00123"
+
+    BigDecimal.fromStringWithin 10 "1e-9999999999"
+    --> Err (BigDecimal.TooLong { digits = 10000000000, limit = 10 })
+
+    BigDecimal.fromStringWithin 10 "1.2.3"
+    --> Err BigDecimal.NotANumber
+
+The count is the digits of the written number on both sides of the point:
+`0.00123` is six, `1e3` is four, `1.5` is two, and zero is one. Leading and
+trailing zeroes in the text are not counted, because the value does not keep
+them. A limit below one refuses everything. Malformed text is `NotANumber`
+whatever its length.
+
+-}
+fromStringWithin : Int -> String -> Result Error BigDecimal
+fromStringWithin limit text =
+    let
+        measure scanned =
+            let
+                count =
+                    digitsToWrite scanned
+            in
+            if count > limit then
+                Err (TooLong { digits = count, limit = limit })
+
+            else
+                Ok (build scanned)
+    in
+    scan text
+        |> Result.fromMaybe NotANumber
+        |> Result.andThen measure
+
+
+{-| What a scan of the text leaves: the digits of the mantissa, validated and
+with the point and any separators removed, the scale those digits sit at
+once the exponent is applied, and the sign. No arithmetic has happened yet.
+-}
+type alias Scanned =
+    { negative : Bool, digits : String, scale : Int }
+
+
+scan : String -> Maybe Scanned
+scan text =
+    let
+        cleaned =
+            dropSeparators text
+    in
+    if String.contains "_" cleaned then
+        Nothing
+
+    else
+        when String.split "e" (String.toLower cleaned) is
+            [ mantissa ] ->
+                scanMantissa mantissa 0
+
+            [ mantissa, exponent ] ->
+                String.toInt exponent
+                    |> Maybe.andThen (scanMantissa mantissa)
+
+            _ ->
+                Nothing
 
 
 {-| The part before the `e`, at the exponent the `e` gave. The exponent moves
 the point, which is a subtraction from the scale and no arithmetic on the
 digits.
 -}
-mantissaOf : String -> Int -> Maybe BigDecimal
-mantissaOf text exponent =
+scanMantissa : String -> Int -> Maybe Scanned
+scanMantissa text exponent =
     let
         body =
             if String.startsWith "-" text || String.startsWith "+" text then
@@ -961,33 +1077,134 @@ mantissaOf text exponent =
         negative =
             String.startsWith "-" text
 
-        build whole fraction =
-            if String.isEmpty (whole ++ fraction) then
+        accept whole fraction =
+            if String.isEmpty (whole ++ fraction) || not (String.all Char.isDigit (whole ++ fraction)) then
                 Nothing
 
             else
-                BigInt.fromStringWithBase 10 (whole ++ fraction)
-                    |> Maybe.map
-                        (\digits ->
-                            make
-                                (if negative then
-                                    BigInt.negate digits
-
-                                 else
-                                    digits
-                                )
-                                (String.count fraction - exponent)
-                        )
+                Just
+                    { negative = negative
+                    , digits = whole ++ fraction
+                    , scale = String.count fraction - exponent
+                    }
     in
     when String.split "." body is
         [ whole ] ->
-            build whole ""
+            accept whole ""
 
         [ whole, fraction ] ->
-            build whole fraction
+            accept whole fraction
 
         _ ->
             Nothing
+
+
+build : Scanned -> BigDecimal
+build scanned =
+    let
+        magnitude =
+            BigInt.fromStringWithBase 10 scanned.digits
+                |> Maybe.withDefault BigInt.zero
+    in
+    make
+        (if scanned.negative then
+            BigInt.negate magnitude
+
+         else
+            magnitude
+        )
+        scanned.scale
+
+
+{-| How many digits [`toString`](#toString) writes for a scanned number,
+worked out from the text alone.
+
+Strip the leading zeroes, which are not digits of the value, and the trailing
+ones, which `make` would fold into the scale. What is left is `m` significant
+digits at some scale `s`. With `s <= 0` the number is an integer with `-s`
+zeroes appended, so `m - s` digits. With `s > 0` there are `s` digits after
+the point and either `m - s` before it or a single `0`, so `max m (s + 1)`.
+Zero is one digit.
+
+-}
+digitsToWrite : Scanned -> Int
+digitsToWrite scanned =
+    let
+        significant =
+            trimLeadingZeroes scanned.digits
+    in
+    if String.isEmpty significant then
+        1
+
+    else
+        let
+            trailing =
+                String.count significant - String.count (trimLeadingZeroes (String.reverse significant))
+
+            m =
+                String.count significant - trailing
+
+            s =
+                scanned.scale - trailing
+        in
+        if s <= 0 then
+            m - s
+
+        else
+            Basics.max m (s + 1)
+
+
+trimLeadingZeroes : String -> String
+trimLeadingZeroes text =
+    if String.startsWith "0" text then
+        trimLeadingZeroes (String.dropFirst 1 text)
+
+    else
+        text
+
+
+{-| Remove the underscores that sit between two decimal digits, and only
+those. Any other underscore is left in place for `fromString` to reject.
+
+This has to run on the whole text, before it is split at the point and the
+`e`, because `1._5` would otherwise become the digits `1` and `_5`, which
+join up into `1_5` and read as fifteen.
+
+-}
+dropSeparators : String -> String
+dropSeparators text =
+    if not (String.contains "_" text) then
+        text
+
+    else
+        dropSeparatorsFrom text
+
+
+dropSeparatorsFrom : String -> String
+dropSeparatorsFrom text =
+    let
+        step char state =
+            if char == '_' then
+                { state | pending = state.pending + 1 }
+
+            else
+                let
+                    kept =
+                        if state.pending > 0 && state.afterDigit && Char.isDigit char then
+                            ""
+
+                        else
+                            String.repeat state.pending "_"
+                in
+                { pending = 0
+                , afterDigit = Char.isDigit char
+                , out = state.out ++ kept ++ String.fromChar char
+                }
+
+        final =
+            String.foldl step { pending = 0, afterDigit = False, out = "" } text
+    in
+    final.out ++ String.repeat final.pending "_"
 
 
 -- WRITING
@@ -1050,14 +1267,14 @@ has fewer and rounded half-even if it has more.
     --> Just "1.50"
 
 This is where significance lives. A `BigDecimal` does not remember that a
-price was quoted to the cent -- `1.50` and `1.5` are one value -- so the number
-of places is something the formatter is told, at the edge, by the code that
-knows what the number is for.
+price was quoted to the cent (`1.50` and `1.5` are one value), so the number
+of places is something the formatter is told, by the code that knows what the
+number is for.
 
 Half-even because it is the rounding that does not drift, and because a
-formatter is a poor place to be asked a question. If the answer matters, round
-first and say which way; `roundTo 2 HalfUp` then `toStringWithPlaces 2` leaves
-this nothing to decide.
+formatter should not be making rounding decisions. If the rounding matters,
+round first and say which way: `roundTo 2 HalfUp` followed by
+`toStringWithPlaces 2` leaves this function nothing to decide.
 
 A count of zero gives a whole number and no point, and a negative one rounds to
 tens or hundreds and writes the zeroes out.

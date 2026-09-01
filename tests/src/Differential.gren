@@ -130,34 +130,15 @@ differentialSuite =
             , U.test "isEven matches Int, across the limb boundary" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (parity "isEven" (\n -> Math.modBy 2 n == 0) BigInt.isEven)
+                        (predicate "isEven" (\n -> Math.modBy 2 n == 0) BigInt.isEven)
                     )
             , U.test "isOdd is its negation everywhere" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (parity "isOdd" (\n -> Math.modBy 2 n /= 0) BigInt.isOdd)
+                        (predicate "isOdd" (\n -> Math.modBy 2 n /= 0) BigInt.isOdd)
                     )
             , U.test "compare matches Int's" <| \_ ->
-                Task.succeed
-                    (Expect.equal []
-                        (small
-                            |> Array.mapAndKeepJust
-                                (\pair ->
-                                    let
-                                        expected =
-                                            Basics.compare pair.a pair.b
-
-                                        actual =
-                                            BigInt.compare (BigInt.fromInt pair.a) (BigInt.fromInt pair.b)
-                                    in
-                                    if expected == actual then
-                                        Nothing
-
-                                    else
-                                        Just (describe pair "compare")
-                                )
-                        )
-                    )
+                Task.succeed (expectNoMismatch (ordering small))
             -- Everything above stays well inside one limb. These do not.
             , U.test "add carries across the limb boundary" <| \_ ->
                 Task.succeed (expectNoMismatch (binary boundary "+" (\a b -> Just (a + b)) (\a b -> Just (BigInt.add a b))))
@@ -196,6 +177,40 @@ differentialSuite =
                         , seven |> BigInt.divBy BigInt.zero
                         , seven |> BigInt.modBy BigInt.zero
                         ]
+                    )
+            , U.test "isZero and isNegative match Int" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (Array.flatten
+                            [ predicate "isZero" (\n -> n == 0) BigInt.isZero
+                            , predicate "isNegative" (\n -> n < 0) BigInt.isNegative
+                            ]
+                        )
+                    )
+            , U.test "abs matches Int" <| \_ ->
+                Task.succeed (expectNoMismatch (unary "abs" Math.abs BigInt.abs))
+            , U.test "max and min match Basics" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (Array.flatten
+                            [ binary small "max" (\a b -> Just (Basics.max a b)) (\a b -> Just (BigInt.max a b))
+                            , binary small "min" (\a b -> Just (Basics.min a b)) (\a b -> Just (BigInt.min a b))
+                            ]
+                        )
+                    )
+            -- Comparing two values of different limb counts is a length
+            -- check before it is anything else, and the sign flips which
+            -- way that check goes.
+            , U.test "compare matches Int across the limb boundary" <| \_ ->
+                Task.succeed (expectNoMismatch (ordering boundary))
+            , U.test "flooring division crosses the limb boundary" <| \_ ->
+                Task.succeed
+                    (expectNoMismatch
+                        (binary (Array.keepIf (\pair -> pair.b /= 0) modest)
+                            "div"
+                            (\a b -> Just ((a - Math.modBy b a) // b))
+                            (\a b -> a |> BigInt.divModBy b |> Maybe.map .quotient)
+                        )
                     )
             ]
         }
@@ -287,8 +302,8 @@ singles =
         ]
 
 
-parity : String -> (Int -> Bool) -> (BigInt -> Bool) -> Array String
-parity name native big =
+predicate : String -> (Int -> Bool) -> (BigInt -> Bool) -> Array String
+predicate name native big =
     singles
         |> Array.mapAndKeepJust
             (\n ->
@@ -370,3 +385,44 @@ show value =
 expectNoMismatch : Array String -> Expect.Expectation
 expectNoMismatch failures =
     Expect.equal [] (Array.takeFirst 8 failures)
+
+
+unary : String -> (Int -> Int) -> (BigInt -> BigInt) -> Array String
+unary name native big =
+    singles
+        |> Array.mapAndKeepJust
+            (\n ->
+                let
+                    expected =
+                        Just (native n)
+
+                    actual =
+                        BigInt.toInt (big (BigInt.fromInt n))
+                in
+                if expected == actual then
+                    Nothing
+
+                else
+                    Just
+                        (name
+                            ++ " "
+                            ++ String.fromInt n
+                            ++ ": expected "
+                            ++ show expected
+                            ++ " but got "
+                            ++ show actual
+                        )
+            )
+
+
+ordering : Array Pair -> Array String
+ordering pairs =
+    pairs
+        |> Array.mapAndKeepJust
+            (\pair ->
+                if Basics.compare pair.a pair.b == BigInt.compare (BigInt.fromInt pair.a) (BigInt.fromInt pair.b) then
+                    Nothing
+
+                else
+                    Just (describe pair "compare")
+            )

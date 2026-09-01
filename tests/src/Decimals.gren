@@ -24,7 +24,7 @@ Three things are being checked, and they fail in different ways:
 
 -}
 
-import BigDecimal exposing (BigDecimal, Rounding(..))
+import BigDecimal exposing (BigDecimal, Error(..), Rounding(..))
 import BigInt
 import Expect
 import Maybe exposing (Maybe(..))
@@ -314,11 +314,29 @@ decimalsSuite =
                         , decimalOf ".5"
                         ]
                     )
-            , U.test "underscores are ignored wherever they fall" <| \_ ->
+            , U.test "an underscore between two digits is a separator" <| \_ ->
                 Task.succeed
-                    (Expect.equal [ Just "1000.0001", Just "1000000" ]
+                    (Expect.equal [ Just "1000.0001", Just "1000000", Just "10", Just "10000000000" ]
                         [ decimalOf "1_000.000_1"
                         , decimalOf "1_000_000"
+                        , decimalOf "1__0"
+                        , decimalOf "1e1_0"
+                        ]
+                    )
+            -- The whole text is scanned before it is split at the point and
+            -- the e, so an underscore beside either cannot slip between two
+            -- digits when the pieces are joined back up.
+            , U.test "and one beside the point, the sign or the e is not" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing ]
+                        [ decimalOf "1_.5"
+                        , decimalOf "1._5"
+                        , decimalOf "_1"
+                        , decimalOf "1_"
+                        , decimalOf "-_1"
+                        , decimalOf "1_e5"
+                        , decimalOf "1e_5"
+                        , decimalOf "_"
                         ]
                     )
             , U.test "and nonsense is Nothing, not zero" <| \_ ->
@@ -506,6 +524,195 @@ decimalsSuite =
                         , Just (text (BigDecimal.movePointBy 5 BigDecimal.zero))
                         ]
                     )
+            , U.test "isZero and isNegative" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, False, True, False, False ]
+                        [ BigDecimal.isZero BigDecimal.zero
+                        , BigDecimal.isZero BigDecimal.one
+                        , BigDecimal.isNegative (BigDecimal.fromInt -1)
+                        , BigDecimal.isNegative BigDecimal.zero
+                        , BigDecimal.isNegative BigDecimal.one
+                        ]
+                    )
+            , U.test "the shapes at the edge of what a person writes" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "1", Just "-0.5", Just "0.5", Just "1", Just "100000", Just "100000", Just "7.5", Just "-0.000000001", Just "0.00123" ]
+                        [ decimalOf "1."
+                        , decimalOf "-.5"
+                        , decimalOf "+.5"
+                        , decimalOf "1e-0"
+                        , decimalOf "1.e5"
+                        , decimalOf "1E+05"
+                        , decimalOf "007.50"
+                        , decimalOf "-1e-9"
+                        , decimalOf "123e-5"
+                        ]
+                    )
+            , U.test "and the shapes that are not numbers" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Nothing ]
+                        [ decimalOf "e5"
+                        , decimalOf "1e+"
+                        , decimalOf "1e5.5"
+                        , decimalOf " 1"
+                        ]
+                    )
+            -- A comma is a thousand in one country and a decimal point in
+            -- another, and the text cannot say which. The doc comment gives
+            -- the recipe for a caller who knows; here it is, run once.
+            , U.test "a comma is refused in either role, and normalised by the caller" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Just "1234.56" ]
+                        [ decimalOf "1,234.56"
+                        , decimalOf "1.234,56"
+                        , decimalOf "1,5"
+                        , decimalOf (german "1.234,56")
+                        ]
+                    )
+            -- Every divisor above is a whole number. These are not, or have
+            -- their zeroes folded into the scale, so the terminating test
+            -- and the result's scale both have a divisor scale to account for.
+            , U.test "a divisor with a point, or a negative scale" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "2", Just "3", Just "0.4", Just "0.005", Just "1000000", Nothing, Just "0", Just "3.33333" ]
+                        [ div "1" "0.5"
+                        , div "0.3" "0.1"
+                        , div "1" "2.5"
+                        , div "1" "2e2"
+                        , div "1e3" "1e-3"
+                        , div "1" "0.3"
+                        , div "0" "3"
+                        , divTo 5 HalfEven "1" "0.3"
+                        ]
+                    )
+            , U.test "arithmetic on negative scales" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1000.001", Just "1000000", Just "101000" ]
+                        [ add "1e3" "0.001"
+                        , mul "1e3" "1e3"
+                        , add "1e3" "1e5"
+                        ]
+                    )
+            , U.test "compare across a negative scale" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just GT, Just LT ]
+                        [ cmp "1e3" "999.9"
+                        , cmp "-1e3" "-999.9"
+                        ]
+                    )
+            , U.test "toInt and toBigInt widen a negative scale back out" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1000", Just "-2", Just "1000", Just "-2" ]
+                        [ Maybe.map String.fromInt (Maybe.andThen BigDecimal.toInt (dec "1e3"))
+                        , Maybe.map String.fromInt (Maybe.andThen BigDecimal.toInt (dec "-2.00"))
+                        , Maybe.map (BigInt.toString << BigDecimal.toBigInt) (dec "1e3")
+                        , Maybe.map (BigInt.toString << BigDecimal.toBigInt) (dec "-2.00")
+                        ]
+                    )
+            , U.test "powBy on a fraction, a negative, and zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "4", Just "2.5", Just "-3.375", Just "0", Just "1" ]
+                        [ Maybe.map (text << BigDecimal.powBy -2) (dec "0.5")
+                        , Maybe.map (text << BigDecimal.powBy -1) (dec "0.4")
+                        , Maybe.map (text << BigDecimal.powBy 3) (dec "-1.5")
+                        , Just (text (BigDecimal.powBy -1 BigDecimal.zero))
+                        , Just (text (BigDecimal.powBy 0 BigDecimal.zero))
+                        ]
+                    )
+            , U.test "fromInt and fromBigInt fold trailing zeroes into the scale" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ -2, -40, 0 ]
+                        [ BigDecimal.scale (BigDecimal.fromInt 100)
+                        , BigDecimal.scale (BigDecimal.fromBigInt (BigInt.fromInt 10 |> BigInt.powBy 40))
+                        , BigDecimal.scale (BigDecimal.fromBigInt BigInt.zero)
+                        ]
+                    )
+            , U.test "a rounding that carries into a new digit" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "10.00", Just "1.00", Just "-1.00", Just "100", Just "10", Just "100" ]
+                        [ Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "9.995")
+                        , Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "0.995")
+                        , Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "-1.005")
+                        , Maybe.map (text << BigDecimal.roundTo 0 HalfUp) (dec "99.5")
+                        , Maybe.map (text << BigDecimal.roundTo 0 HalfUp) (dec "9.5")
+                        , Maybe.map (BigDecimal.toStringWithPlaces 0) (dec "99.5")
+                        ]
+                    )
+            , U.test "negative places in toStringWithPlaces write the zeroes out" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "12300", Just "12400", Just "200", Just "0" ]
+                        [ Maybe.map (BigDecimal.toStringWithPlaces -2) (dec "12345")
+                        , Maybe.map (BigDecimal.toStringWithPlaces -2) (dec "12350")
+                        , Maybe.map (text << BigDecimal.roundTo -2 HalfEven) (dec "150")
+                        , Maybe.map (text << BigDecimal.roundTo -3 HalfUp) (dec "100")
+                        ]
+                    )
+            , U.test "divByTo carries, and divides zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "10", Just "0", Just "0.1" ]
+                        [ divTo 2 HalfEven "9.999" "1"
+                        , divTo 5 HalfEven "0" "3"
+                        , divTo 1 HalfEven "0.05" "0.5"
+                        ]
+                    )
+            , U.test "fromFloat of a negative zero, and of a big negative" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0", Just "-1000000000000000019884624838656" ]
+                        [ Maybe.map text (BigDecimal.fromFloat -0.0)
+                        , Maybe.map text (BigDecimal.fromFloat -1.0e30)
+                        ]
+                    )
+            , U.test "toFloat rounds a long fraction to the nearest double" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just 0.1, Just 1.0e21 ]
+                        [ Maybe.map BigDecimal.toFloat (dec "0.1000000000000000000000000000000000000000000000000000001")
+                        , Maybe.map BigDecimal.toFloat (dec "1000000000000000000000")
+                        ]
+                    )
+            , U.test "a hundred-thousand-place exponent writes every zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just 100002) (Maybe.map String.count (decimalOf "1e-100000")))
+            -- The bounded reader counts the digits toString would write,
+            -- from the text alone, so the exponent cannot turn thirteen
+            -- characters into ten billion digits.
+            , U.test "fromStringWithin counts the digits toString would write" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Ok "0.00123", Ok "1000", Ok "1.5", Ok "0", Ok "1", Ok "-0.5", Ok "0.000000001" ]
+                        [ within 6 "0.00123"
+                        , within 4 "1e3"
+                        , within 2 "1.5"
+                        , within 1 "0.000"
+                        , within 1 "1000e-3"
+                        , within 2 "-.5"
+                        , within 10 "1e-9"
+                        ]
+                    )
+            , U.test "and refuses one digit over" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Err (TooLong { digits = 6, limit = 5 })
+                        , Err (TooLong { digits = 4, limit = 3 })
+                        , Err (TooLong { digits = 10, limit = 9 })
+                        , Err (TooLong { digits = 10000000000, limit = 10 })
+                        , Err NotANumber
+                        , Err NotANumber
+                        ]
+                        [ within 5 "0.00123"
+                        , within 3 "1e3"
+                        , within 9 "1e-9"
+                        , within 10 "1e-9999999999"
+                        , within 10 "1.2.3"
+                        , within 1 "1e"
+                        ]
+                    )
+            , U.test "an exponent beyond an Int is still just too long" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, True ]
+                        [ isTooLong (within 10 "1e99999999999999999999")
+                        , isTooLong (within 10 "1e-99999999999999999999")
+                        ]
+                    )
             ]
         }
 
@@ -588,3 +795,28 @@ repeatAdd count value acc =
 
     else
         repeatAdd (count - 1) value (BigDecimal.add acc value)
+
+
+within : Int -> String -> Result Error String
+within limit source =
+    BigDecimal.fromStringWithin limit source |> Result.map text
+
+
+isTooLong : Result Error String -> Bool
+isTooLong result =
+    when result is
+        Err (TooLong _) ->
+            True
+
+        _ ->
+            False
+
+
+{-| The localisation recipe from the `fromString` doc comment: drop the
+grouping points, turn the decimal comma into a point.
+-}
+german : String -> String
+german source =
+    source
+        |> String.replace "." ""
+        |> String.replace "," "."

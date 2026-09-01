@@ -14,6 +14,7 @@ this be".
 
 import BigInt exposing (BigInt)
 import Expect
+import Math
 import Maybe exposing (Maybe(..))
 import Task
 import Test.Runner.UnitNode as U
@@ -150,6 +151,69 @@ bigNumbersSuite =
                 Task.succeed (Expect.equal "0" (BigInt.toString (BigInt.zero |> BigInt.powBy -3)))
             , U.test "anything to the zeroth is one" <| \_ ->
                 Task.succeed (Expect.equal "1" (BigInt.toString (factorial 30 |> BigInt.powBy 0)))
+            -- Algorithm D with signs. The magnitudes are the ones above; what
+            -- changes is that flooring has to step the quotient one further
+            -- and hand back a modulus with the divisor's sign.
+            , U.test "flooring division of multi-limb negatives" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "-27989120778730014270"
+                        , Just "558778513335778814"
+                        , Just "-27989120778730014270"
+                        , Just "-558778513335778814"
+                        ]
+                        [ BigInt.negate (power 2 128) |> BigInt.divModBy (power 3 40) |> Maybe.map (BigInt.toString << .quotient)
+                        , BigInt.negate (power 2 128) |> BigInt.divModBy (power 3 40) |> Maybe.map (BigInt.toString << .modulus)
+                        , power 2 128 |> BigInt.divModBy (BigInt.negate (power 3 40)) |> Maybe.map (BigInt.toString << .quotient)
+                        , power 2 128 |> BigInt.divModBy (BigInt.negate (power 3 40)) |> Maybe.map (BigInt.toString << .modulus)
+                        ]
+                    )
+            , U.test "a dividend shorter than its divisor" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0", Just "5", Just "-1", Just "18446744073709551611" ]
+                        [ BigInt.fromInt 5 |> BigInt.quotRemBy (power 2 64) |> Maybe.map (BigInt.toString << .quotient)
+                        , BigInt.fromInt 5 |> BigInt.quotRemBy (power 2 64) |> Maybe.map (BigInt.toString << .remainder)
+                        , BigInt.fromInt -5 |> BigInt.divModBy (power 2 64) |> Maybe.map (BigInt.toString << .quotient)
+                        , BigInt.fromInt -5 |> BigInt.divModBy (power 2 64) |> Maybe.map (BigInt.toString << .modulus)
+                        ]
+                    )
+            , U.test "toInt stops exactly at the safe integers" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just Math.maxSafeInteger, Nothing, Just (Basics.negate Math.maxSafeInteger), Nothing ]
+                        [ BigInt.toInt (BigInt.fromInt Math.maxSafeInteger)
+                        , BigInt.toInt (BigInt.fromInt Math.maxSafeInteger |> BigInt.add BigInt.one)
+                        , BigInt.toInt (BigInt.fromInt (Basics.negate Math.maxSafeInteger))
+                        , BigInt.toInt (BigInt.fromInt (Basics.negate Math.maxSafeInteger) |> BigInt.subBy BigInt.one)
+                        ]
+                    )
+            , U.test "toFloat past a double's range is an infinity" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, True ]
+                        [ Basics.isInfinite (BigInt.toFloat (power 2 2000))
+                        , BigInt.toFloat (BigInt.negate (power 2 2000)) < 0
+                        ]
+                    )
+            , U.test "a negative Float that truncates to nothing is plain zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0", Just "0", Just "0" ]
+                        [ Maybe.map BigInt.toString (BigInt.fromFloat -0.0)
+                        , Maybe.map BigInt.toString (BigInt.fromFloat -0.5)
+                        , Maybe.map (BigInt.toString << BigInt.negate) (BigInt.fromFloat -0.5)
+                        ]
+                    )
+            , U.test "the largest double converts with all 309 digits" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        (Just "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368")
+                        (Maybe.map BigInt.toString (BigInt.fromFloat 1.7976931348623157e308))
+                    )
+            , U.test "minus one to a negative power keeps its sign" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "-1", "1" ]
+                        [ BigInt.toString (BigInt.fromInt -1 |> BigInt.powBy -3)
+                        , BigInt.toString (BigInt.fromInt -1 |> BigInt.powBy -2)
+                        ]
+                    )
             ]
         }
 

@@ -191,6 +191,67 @@ bitsSuite =
                         , text (BigInt.maskTo 0 (num 255))
                         ]
                     )
+            , U.test "negatives past one limb" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ "0", "-1208925819614629174706177", "-1180591620717411291079", "-1180591620717411303424" ]
+                        [ text (BigInt.and (BigInt.negate (twoTo 64)) (twoTo 64 |> BigInt.subBy BigInt.one))
+                        , text (BigInt.xor (num -1) (twoTo 80))
+                        , text (BigInt.or (BigInt.negate (twoTo 70)) (num 12345))
+                        , text (BigInt.and (BigInt.negate (twoTo 70)) (BigInt.negate (twoTo 50)))
+                        ]
+                    )
+            , U.test "shifting by nothing, by whole limbs, and past the end" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "7", "-7", "0", "-1", "-1", "16777216", "281474976710656", "1" ]
+                        [ text (num 7 |> BigInt.shiftLeftBy 0)
+                        , text (num -7 |> BigInt.shiftRightBy 0)
+                        , text (num 7 |> BigInt.shiftRightBy 100)
+                        , text (num -7 |> BigInt.shiftRightBy 100)
+                        , text (num -7 |> BigInt.shiftLeftBy -100)
+                        , text (num 1 |> BigInt.shiftLeftBy 24)
+                        , text (num 1 |> BigInt.shiftLeftBy 48)
+                        , text (twoTo 48 |> BigInt.shiftRightBy 48)
+                        ]
+                    )
+            , U.test "bitLength and popCount read the magnitude of a negative" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ 8, 8, 1 ]
+                        [ BigInt.bitLength (num -255)
+                        , BigInt.popCount (num -255)
+                        , BigInt.popCount (num -1)
+                        ]
+                    )
+            , U.test "a negative value through the signed and unsigned views" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ "-1", "127", "-128", "127", "340282366920938463463374607431768211455", "1267650600228229401496703193031" ]
+                        [ text (BigInt.toSigned 8 (num -1))
+                        , text (BigInt.toSigned 8 (num -129))
+                        , text (BigInt.toSigned 8 (num -128))
+                        , text (BigInt.maskTo 8 (num -129))
+                        , text (BigInt.maskTo 128 (num -1))
+                        , text (BigInt.maskTo 100 (num -12345))
+                        ]
+                    )
+            , U.test "a width that is not a whole number of limbs" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "0", "-549755813888" ]
+                        [ text (BigInt.maskTo 40 (BigInt.negate (twoTo 64)))
+                        , text (BigInt.toSigned 40 (twoTo 39))
+                        ]
+                    )
+            , U.test "and a negative width is the same as zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "0", "0", "yes", "no", "yes", "no" ]
+                        [ text (BigInt.maskTo -3 (num 255))
+                        , text (BigInt.toSigned -3 (num 255))
+                        , yesNo (BigInt.fitsUnsigned -3 (num 0))
+                        , yesNo (BigInt.fitsUnsigned -3 (num 1))
+                        , yesNo (BigInt.fitsSigned -3 (num 0))
+                        , yesNo (BigInt.fitsSigned -3 (num 1))
+                        ]
+                    )
             ]
         }
 
@@ -217,3 +278,8 @@ yesNo value =
 
     else
         "no"
+
+
+twoTo : Int -> BigInt
+twoTo exponent =
+    BigInt.fromInt 2 |> BigInt.powBy exponent

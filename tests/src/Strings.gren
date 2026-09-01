@@ -51,11 +51,24 @@ stringsSuite =
                         , decimalOf "-0xDEADBEEF"
                         ]
                     )
-            , U.test "underscores are ignored wherever they fall" <| \_ ->
+            , U.test "an underscore between two digits is a separator" <| \_ ->
                 Task.succeed
-                    (Expect.equal [ Just "3735928559", Just "1000000" ]
+                    (Expect.equal [ Just "3735928559", Just "1000000", Just "1000", Just "255" ]
                         [ decimalOf "0xdead_beef"
                         , decimalOf "1_000_000"
+                        , decimalOf "1__000"
+                        , Maybe.map BigInt.toString (BigInt.fromStringWithBase 16 "f_f")
+                        ]
+                    )
+            , U.test "and an underscore anywhere else is not" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Nothing, Nothing, Nothing ]
+                        [ decimalOf "_1"
+                        , decimalOf "1_"
+                        , decimalOf "0x_ff"
+                        , decimalOf "-_1"
+                        , decimalOf "_"
+                        , Maybe.map BigInt.toString (BigInt.fromStringWithBase 16 "_ff")
                         ]
                     )
             , U.test "and nonsense is Nothing, not zero" <| \_ ->
@@ -208,6 +221,78 @@ stringsSuite =
                     )
             , U.test "every base round trips, for a number of every size" <| \_ ->
                 Task.succeed (Expect.equal [] (Array.takeFirst 8 roundTripFailures))
+            , U.test "leading zeroes, stray signs and spaces" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "12", Just "255", Nothing, Nothing, Nothing, Nothing, Nothing, Nothing ]
+                        [ decimalOf "00012"
+                        , decimalOf "0x0000ff"
+                        , decimalOf "+"
+                        , decimalOf "--1"
+                        , decimalOf "+-1"
+                        , decimalOf " 12"
+                        , decimalOf "12 "
+                        , decimalOf "0x-ff"
+                        ]
+                    )
+            , U.test "prefixes in upper case, and the last digit of base 36" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "10", Just "8", Just "35" ]
+                        [ decimalOf "0B1010"
+                        , decimalOf "0O10"
+                        , Maybe.map BigInt.toString (BigInt.fromStringWithBase 36 "Z")
+                        ]
+                    )
+            -- The bounded reader. Its job is to say no before doing any
+            -- arithmetic, so the million-digit case below is fast, and to
+            -- say why.
+            , U.test "fromStringWithin accepts what fits" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Ok "18446744073709551615", Ok "255", Ok "0", Ok "-255" ]
+                        [ within 20 "18446744073709551615"
+                        , within 2 "0x0000ff"
+                        , within 1 "0"
+                        , within 3 "-2_5_5"
+                        ]
+                    )
+            , U.test "and says why it refused" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Err (BigInt.TooLong { digits = 21, limit = 20 })
+                        , Err (BigInt.TooLong { digits = 3, limit = 2 })
+                        , Err BigInt.NotANumber
+                        , Err BigInt.NotANumber
+                        , Err (BigInt.TooLong { digits = 1, limit = 0 })
+                        ]
+                        [ within 20 "123456789012345678901"
+                        , within 2 "0xfff"
+                        , within 20 "twelve"
+                        , within 2 "12345 apples"
+                        , within 0 "0"
+                        ]
+                    )
+            , U.test "a million digits are refused before being parsed" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Err (BigInt.TooLong { digits = 1000000, limit = 100 }))
+                        (within 100 (String.repeat 1000000 "9"))
+                    )
+            , U.test "fromStringWithBaseWithin counts digits in that base" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Ok "57005"
+                        , Ok "-255"
+                        , Err (BigInt.TooLong { digits = 5, limit = 4 })
+                        , Err (BigInt.TooLong { digits = 5, limit = 4 })
+                        , Err BigInt.NotANumber
+                        , Err BigInt.NotANumber
+                        ]
+                        [ BigInt.fromStringWithBaseWithin 16 4 "dead" |> Result.map BigInt.toString
+                        , BigInt.fromStringWithBaseWithin 16 2 "-00ff" |> Result.map BigInt.toString
+                        , BigInt.fromStringWithBaseWithin 2 4 "11111" |> Result.map BigInt.toString
+                        , BigInt.fromStringWithBaseWithin 10 4 "10000" |> Result.map BigInt.toString
+                        , BigInt.fromStringWithBaseWithin 16 4 "0xff" |> Result.map BigInt.toString
+                        , BigInt.fromStringWithBaseWithin 37 4 "11" |> Result.map BigInt.toString
+                        ]
+                    )
             ]
         }
 
@@ -288,3 +373,8 @@ num =
 big : String -> BigInt
 big text =
     Maybe.withDefault BigInt.zero (BigInt.fromString text)
+
+
+within : Int -> String -> Result BigInt.Error String
+within limit text =
+    BigInt.fromStringWithin limit text |> Result.map BigInt.toString

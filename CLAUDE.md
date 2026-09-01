@@ -23,7 +23,7 @@ Everything runs inside devbox; `gren` and node 22 are not on `PATH` otherwise.
 ```sh
 devbox run build    # compile the package
 devbox run docs     # check the doc comments parse
-devbox run test     # tests/run.sh: 132 checks, ~1s
+devbox run test     # tests/run.sh: 177 checks, ~1s
 ```
 
 Format sources after editing them, especially after scripted edits. The
