@@ -150,6 +150,15 @@ decimalsSuite =
                     (Expect.equal (Just "0")
                         (Maybe.map (text << BigDecimal.powBy -1) (dec "3"))
                     )
+            , U.test "sum adds a column up, and an empty one to zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "0.3", "66.9", "0", "0" ]
+                        [ sumOf [ "0.1", "0.1", "0.1" ]
+                        , sumOf [ "19.99", "19.99", "19.99", "4.95", "0.99", "0.99" ]
+                        , sumOf [ "1.5", "-1.5" ]
+                        , sumOf []
+                        ]
+                    )
             -- DIVIDING EXACTLY
             , U.test "an exact division comes out" <| \_ ->
                 Task.succeed
@@ -248,6 +257,126 @@ decimalsSuite =
                         , div "-7" "-8"
                         , div "7" "-8"
                         ]
+                    )
+            -- SPLITTING A TOTAL
+            --
+            -- Each of these is checked twice: the parts, and that they add
+            -- back up to what went in. The second is the point of the
+            -- functions and the thing division cannot do -- three shares of
+            -- ten pounds come to 9.99 or 10.02 whichever way they are
+            -- rounded, and never to ten.
+            , U.test "allocate gives the odd unit to the earliest parts" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just [ "3.34", "3.33", "3.33" ]
+                        , Just [ "0.02", "0.02", "0.01" ]
+                        , Just [ "0.15", "0.15", "0.14", "0.14", "0.14", "0.14", "0.14" ]
+                        , Just [ "2.5", "2.5", "2.5", "2.5" ]
+                        ]
+                        [ split 2 3 "10.00"
+                        , split 2 3 "0.05"
+                        , split 2 7 "1.00"
+                        , split 2 4 "10.00"
+                        ]
+                    )
+            , U.test "which is a cent no rounding mode can find" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "9.99", Just "9.99", Just "10.02", Just "10" ]
+                        [ threeShares HalfUp
+                        , threeShares HalfEven
+                        , threeShares Up
+                        , splitSum 2 3 "10.00"
+                        ]
+                    )
+            , U.test "the parts add back up whatever the total was" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1", Just "0.05", Just "-10", Just "0" ]
+                        [ splitSum 2 7 "1.00"
+                        , splitSum 2 3 "0.05"
+                        , splitSum 2 3 "-10.00"
+                        , splitSum 2 3 "0"
+                        ]
+                    )
+            , U.test "a negative total splits away from zero, the same way" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just [ "-3.34", "-3.33", "-3.33" ]) (split 2 3 "-10.00"))
+            , U.test "places names the smallest unit, and it may be a coarse one" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just [ "34", "33", "33" ], Just [ "200", "200", "100" ] ]
+                        [ split 0 3 "100"
+                        , split -2 3 "500"
+                        ]
+                    )
+            , U.test "and a total that is not whole units is refused, not rounded" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Just [ "0", "0", "0" ] ]
+                        [ split 2 3 "10.005"
+                        , split -2 3 "550"
+                        , split 2 0 "10.00"
+                        , split 2 3 "0"
+                        ]
+                    )
+            , U.test "allocateBy shares a total out in proportion" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just [ "8.96", "0.74", "0.3" ]
+                        , Just [ "-8.96", "-0.74", "-0.3" ]
+                        , Just [ "0.01", "0.02" ]
+                        ]
+                        [ splitBy 2 [ "59.97", "4.95", "1.98" ] "10.00"
+                        , splitBy 2 [ "59.97", "4.95", "1.98" ] "-10.00"
+                        , splitBy 2 [ "1", "2" ] "0.03"
+                        ]
+                    )
+            , U.test "and those parts add back up too" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "10", Just "-10", Just "0.03", Just "0" ]
+                        [ splitBySum 2 [ "59.97", "4.95", "1.98" ] "10.00"
+                        , splitBySum 2 [ "59.97", "4.95", "1.98" ] "-10.00"
+                        , splitBySum 2 [ "1", "2" ] "0.03"
+                        , splitBySum 2 [ "59.97", "4.95", "1.98" ] "0"
+                        ]
+                    )
+            , U.test "weights are relative, and the scales they are written at do not matter" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just [ "2.5", "2.5", "5" ]
+                        , Just [ "2.5", "2.5", "5" ]
+                        , Just [ "6.67", "3.33" ]
+                        ]
+                        [ splitBy 2 [ "1", "1", "2" ] "10.00"
+                        , splitBy 2 [ "25", "25", "50" ] "10.00"
+                        , splitBy 2 [ "0.5", "0.25" ] "10.00"
+                        ]
+                    )
+            , U.test "equal weights are the split allocate makes" <| \_ ->
+                Task.succeed
+                    (Expect.equal (split 2 3 "0.05") (splitBy 2 [ "1", "1", "1" ] "0.05"))
+            , U.test "a weight of nothing is given nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just [ "0.02", "0", "0.01" ]) (splitBy 2 [ "1", "0", "1" ] "0.03"))
+            , U.test "and weights that name no share at all are refused" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing, Nothing ]
+                        [ splitBy 2 [] "1.00"
+                        , splitBy 2 [ "1", "-1" ] "1.00"
+                        , splitBy 2 [ "0", "0" ] "1.00"
+                        , splitBy 2 [ "1", "2" ] "0.005"
+                        ]
+                    )
+            -- The shares are only exact if the division under them is. This
+            -- total is past 2^53, where a Float would put the point in the
+            -- wrong place and the parts would stop adding up.
+            , U.test "a total far past what a Float holds still adds back up" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        { parts = Just [ "41152263004115226300411522630", "82304526008230452600823045260" ]
+                        , total = Just "123456789012345678901234567890"
+                        }
+                        { parts = splitBy 2 [ "1", "2" ] "123456789012345678901234567890.00"
+                        , total = splitBySum 2 [ "1", "2" ] "123456789012345678901234567890.00"
+                        }
                     )
             -- ROUNDING
             , U.test "Up and Down ignore how close it was" <| \_ ->
@@ -384,6 +513,29 @@ decimalsSuite =
                     (Expect.equal [ Just "2.68", Just "2.66" ]
                         [ Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "2.675001")
                         , Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "2.665")
+                        ]
+                    )
+            , U.test "toStringWithPlacesUsing is the same function, told which way" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "2.35", Just "2.34", Just "-1.01", Just "-1.00", Just "0.13", Just "0.12" ]
+                        [ placesUsing 2 HalfUp "2.345"
+                        , placesUsing 2 HalfEven "2.345"
+                        , placesUsing 2 HalfUp "-1.005"
+                        , placesUsing 2 HalfEven "-1.005"
+                        , placesUsing 2 HalfUp "0.125"
+                        , placesUsing 2 HalfEven "0.125"
+                        ]
+                    )
+            -- The plain one is this one with HalfEven, so the two agree
+            -- wherever the mode does and only there.
+            , U.test "and the plain one is it with half-even" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, True, True, False ]
+                        [ sameEitherWay 2 HalfEven "2.345"
+                        , sameEitherWay 2 HalfEven "-1.005"
+                        , sameEitherWay 2 HalfUp "9.995"
+                        , sameEitherWay 2 HalfUp "2.345"
                         ]
                     )
             -- Python writes this one "-0.00", because its zero carries a sign.
@@ -795,6 +947,65 @@ repeatAdd count value acc =
 
     else
         repeatAdd (count - 1) value (BigDecimal.add acc value)
+
+
+decs : Array String -> Array BigDecimal
+decs sources =
+    Array.mapAndKeepJust dec sources
+
+
+sumOf : Array String -> String
+sumOf sources =
+    text (BigDecimal.sum (decs sources))
+
+
+split : Int -> Int -> String -> Maybe (Array String)
+split places parts total =
+    dec total
+        |> Maybe.andThen (BigDecimal.allocate places parts)
+        |> Maybe.map (Array.map text)
+
+
+splitSum : Int -> Int -> String -> Maybe String
+splitSum places parts total =
+    dec total
+        |> Maybe.andThen (BigDecimal.allocate places parts)
+        |> Maybe.map (\parts_ -> text (BigDecimal.sum parts_))
+
+
+splitBy : Int -> Array String -> String -> Maybe (Array String)
+splitBy places weights total =
+    dec total
+        |> Maybe.andThen (BigDecimal.allocateBy places (decs weights))
+        |> Maybe.map (Array.map text)
+
+
+splitBySum : Int -> Array String -> String -> Maybe String
+splitBySum places weights total =
+    dec total
+        |> Maybe.andThen (BigDecimal.allocateBy places (decs weights))
+        |> Maybe.map (\parts -> text (BigDecimal.sum parts))
+
+
+{-| Ten pounds in three, as dividing gives it, added back up. This is the sum
+that no rounding mode makes come to ten, and the reason `allocate` exists.
+-}
+threeShares : Rounding -> Maybe String
+threeShares rounding =
+    dec "10.00"
+        |> Maybe.andThen (BigDecimal.divByTo 2 rounding (BigDecimal.fromInt 3))
+        |> Maybe.map (\share -> text (BigDecimal.sum [ share, share, share ]))
+
+
+placesUsing : Int -> Rounding -> String -> Maybe String
+placesUsing places rounding source =
+    Maybe.map (BigDecimal.toStringWithPlacesUsing places rounding) (dec source)
+
+
+sameEitherWay : Int -> Rounding -> String -> Bool
+sameEitherWay places rounding source =
+    placesUsing places rounding source
+        == Maybe.map (BigDecimal.toStringWithPlaces places) (dec source)
 
 
 within : Int -> String -> Result Error String

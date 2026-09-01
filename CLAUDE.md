@@ -23,7 +23,7 @@ Everything runs inside devbox; `gren` and node 22 are not on `PATH` otherwise.
 ```sh
 devbox run build    # compile the package
 devbox run docs     # check the doc comments parse
-devbox run test     # tests/run.sh: 177 checks, ~1s
+devbox run test     # tests/run.sh: 205 checks, ~1s
 ```
 
 Format sources after editing them, especially after scripted edits. The
@@ -93,13 +93,25 @@ govern it:
    semantics. The stripping goes seven zeroes at a time (10^7, the largest
    power of ten inside a 24-bit limb) before falling back to one at a time.
 2. **Nothing but division rounds.** `add` widens both operands to the finer
-   scale, `mul` adds the scales. `Rounding` appears in exactly two places,
-   `roundTo` and `divByTo`, and both go through `roundedQuotient`, which is one
-   truncating `BigInt` division plus a conditional step away from zero.
+   scale, `mul` adds the scales. `Rounding` changes a value in exactly two
+   places, `roundTo` and `divByTo`, and both go through `roundedQuotient`,
+   which is one truncating `BigInt` division plus a conditional step away from
+   zero. `toStringWithPlacesUsing` takes a `Rounding` as well, but only to
+   write a value down — `toStringWithPlaces` is it with `HalfEven`, which is
+   the only reason the plain formatter appears to round on its own.
 3. **`divBy` is exact or `Nothing`**, and the test needs no gcd: write the
    divisor as `2^a * 5^b * m`, and `n / d` terminates exactly when `d` divides
    `n * 10^k` for `k = max a b`. `terminatingShift` finds that `k`, and the one
    division both tests the question and produces the digits.
+4. **`allocate` and `allocateBy` hand out what division loses.** Both work in
+   whole units at a given number of places: the total is converted to an
+   integer count of units, split, and converted back, so the parts always add
+   up to the total. `allocateBy` is the largest-remainder method, and its
+   ordering breaks ties by index on purpose — that is what makes equal weights
+   agree with `allocate`, and it must not be left to `Array.sortWith` being
+   stable. Both refuse a total that is not a whole number of units rather than
+   rounding it, on the same grounds `toInt` refuses a fraction: the rounding is
+   the caller's decision and there is exactly one place to make it.
 
 `fromFloat` is exact — the double's real value, not the number that was typed
 — which is the same stance `BigInt.fromFloat` takes and is worth preserving.
@@ -108,7 +120,7 @@ govern it:
 ## Tests
 
 `tests/` is a separate Gren application depending on this package through
-`"local:../"`, run with `gilramir/gren-unit-node`. Five suites, and the split
+`"local:../"`, run with `gilramir/gren-unit-node`. Six suites, and the split
 matters:
 
 - `Differential.gren` — the same sums twice, through `BigInt` and through
@@ -122,7 +134,13 @@ matters:
 - `Decimals.gren` — `BigDecimal`, against Python's `decimal`, which is the
   same representation and the same seven roundings. The rounding tests are a
   row of seven values per mode, because six of the seven modes agree about
-  `2.4` and only disagree at `2.5`.
+  `2.4` and only disagree at `2.5`. Every allocation is checked twice, once
+  for the parts and once for their sum; the sum is the property, and a test
+  that only checks the parts would pass on an implementation that loses money.
+- `Cart.gren` — a checkout end to end. The only suite where the *order* of
+  operations is under test: the discount rounded once before it is shared out,
+  tax on the net rather than the gross, the total split rather than divided.
+  Its expected values come from Python too.
 
 When adding a `BigInt` operation, add it to the differential suite first: it is
 the one that finds sign and zero bugs without anybody having to think of them.

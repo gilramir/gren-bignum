@@ -4,6 +4,8 @@ module BigDecimal exposing
     , Rounding(..)
     , abs
     , add
+    , allocate
+    , allocateBy
     , compare
     , divBy
     , divByTo
@@ -25,11 +27,13 @@ module BigDecimal exposing
     , roundTo
     , scale
     , subBy
+    , sum
     , toBigInt
     , toFloat
     , toInt
     , toString
     , toStringWithPlaces
+    , toStringWithPlacesUsing
     , unscaled
     , zero
     )
@@ -51,8 +55,10 @@ does:
 A value is a [`BigInt`](BigInt) and a power of ten: `unscaled * 10^-scale`.
 There is no fixed precision anywhere, so `add`, `subBy` and `mul` never round.
 They widen. The only operation that can fail to terminate is division, and
-division and [`roundTo`](#roundTo) are the only operations that take a
-[`Rounding`](#Rounding).
+division and [`roundTo`](#roundTo) are the only operations that round a value.
+[`toStringWithPlacesUsing`](#toStringWithPlacesUsing) takes a
+[`Rounding`](#Rounding) too, but only to write a value down; it changes
+nothing.
 
 
 ## One value, one representation
@@ -86,7 +92,7 @@ question, and you ask it at the edge:
 
 ## Reading and writing
 
-@docs fromString, toString, toStringWithPlaces
+@docs fromString, toString, toStringWithPlaces, toStringWithPlacesUsing
 
 
 ## Reading text you did not write
@@ -96,7 +102,7 @@ question, and you ask it at the edge:
 
 ## Arithmetic
 
-@docs add, subBy, mul, negate, abs, powBy
+@docs add, sum, subBy, mul, negate, abs, powBy
 
 
 ## Dividing
@@ -105,6 +111,14 @@ There are two, because a decimal division either terminates or it does not,
 and only the caller knows which outcome is acceptable.
 
 @docs divBy, divByTo
+
+
+## Splitting a total
+
+Dividing rounds each share on its own, so the shares stop adding up to the
+thing you divided. These two hand out the difference instead of losing it.
+
+@docs allocate, allocateBy
 
 
 ## Rounding
@@ -468,6 +482,28 @@ add (BigDecimal a) (BigDecimal b) =
     make (BigInt.add (at places a) (at places b)) places
 
 
+{-| Add up an array, exactly.
+
+    BigDecimal.sum
+        [ BigDecimal.fromInt 1990 |> BigDecimal.movePointBy -2
+        , BigDecimal.fromInt 495 |> BigDecimal.movePointBy -2
+        ]
+        |> BigDecimal.toString
+    --> "24.85"
+
+A column of prices is the commonest thing anyone does with these, and the
+reason it is worth a function of its own is that nothing here rounds: the
+answer does not depend on the order the values arrive in, which is exactly
+what a `Float` cannot promise.
+
+`sum` of an empty array is [`zero`](#zero).
+
+-}
+sum : Array BigDecimal -> BigDecimal
+sum values =
+    Array.foldl add zero values
+
+
 {-| Subtract the first from the second: `subBy b a` is `a - b`.
 
     a |> BigDecimal.subBy one
@@ -666,6 +702,246 @@ divByTo places rounding (BigDecimal divisor) (BigDecimal dividend) =
                     )
                     places
                 )
+
+
+-- SPLITTING A TOTAL
+--
+-- Division answers "what is each share", and answers it for one share at a
+-- time. That is why the shares stop adding up: `10.00 / 3` is `3.33` to the
+-- cent however it is rounded, and three of those is `9.99`. The missing cent
+-- is not a rounding error to be tuned away -- there is no answer at two places
+-- that works -- so it has to be handed to somebody. Both functions here hand
+-- it out and say who got it.
+
+
+{-| Split a total into parts that add back up to it:
+`allocate places parts total`.
+
+`places` says where the smallest unit is: `2` for a currency with cents, `0`
+for one without, and it may be negative to hand out whole hundreds.
+
+    BigDecimal.fromString "10.00"
+        |> Maybe.andThen (BigDecimal.allocate 2 3)
+        |> Maybe.map (Array.map BigDecimal.toString)
+    --> Just [ "3.34", "3.33", "3.33" ]
+
+Compare what dividing gives you. `divByTo 2 HalfUp` makes every share `3.33`,
+and three times `3.33` is `9.99`; the cent is gone and no rounding mode brings
+it back. Here the parts differ by one unit at the most, the earliest ones take
+the extra, and the sum is the total you passed in.
+
+There are two refusals, and both are refusals rather than roundings:
+
+  - `parts` is less than one. There is nowhere to put the money.
+  - `total` is not a whole number of units at `places`. `allocate 2` will not
+    split `10.005`, because a third of a cent is not something to hand
+    anybody. Round first and own the rounding:
+    `allocate 2 3 (roundTo 2 HalfUp total)`.
+
+A negative total splits away from zero the same way, so the parts of
+`negate total` are the negated parts of `total`.
+
+-}
+allocate : Int -> Int -> BigDecimal -> Maybe (Array BigDecimal)
+allocate places parts total =
+    if parts < 1 then
+        Nothing
+
+    else
+        unitsAt places total
+            |> Maybe.andThen
+                (\units ->
+                    BigInt.quotRemBy (BigInt.fromInt parts) units
+                        |> Maybe.map
+                            (\answer ->
+                                let
+                                    -- The remainder carries the sign of the
+                                    -- total, and its size is below `parts` by
+                                    -- construction, so it is safe as an `Int`
+                                    -- and it never asks for more units than
+                                    -- there are parts to give them to.
+                                    extras =
+                                        BigInt.abs answer.remainder
+                                            |> BigInt.toInt
+                                            |> Maybe.withDefault 0
+
+                                    bumped =
+                                        BigInt.add answer.quotient (unitStep units)
+                                in
+                                Array.initialize parts
+                                    0
+                                    (\index ->
+                                        if index < extras then
+                                            make bumped places
+
+                                        else
+                                            make answer.quotient places
+                                    )
+                            )
+                )
+
+
+{-| Split a total in proportion to a set of weights, and still have the parts
+add back up to it: `allocateBy places weights total`.
+
+This is the one a cart wants. An order-level discount comes off the lines, and
+it has to come off them exactly, or the lines no longer explain the total.
+
+    -- 10.00 off, shared out over three lines by what they cost
+    BigDecimal.fromString "10.00"
+        |> Maybe.andThen (BigDecimal.allocateBy 2 [ line1, line2, line3 ])
+
+Weights are relative, so `[ 1, 1, 2 ]` and `[ 25, 25, 50 ]` split alike and
+the scales they are written at do not matter. Each part is its exact share
+rounded toward zero, and the units left over go to the parts whose discarded
+fractions were biggest, earliest first. That is the largest-remainder method,
+and it is what keeps the parts within one unit of each other's fair share.
+
+    BigDecimal.fromString "0.05"
+        |> Maybe.andThen
+            (BigDecimal.allocateBy 2
+                [ BigDecimal.one, BigDecimal.one, BigDecimal.one ]
+            )
+        |> Maybe.map (Array.map BigDecimal.toString)
+    --> Just [ "0.02", "0.02", "0.01" ]
+
+Equal weights are the same split [`allocate`](#allocate) makes, and it refuses
+the same total that is not a whole number of units. On top of that this one
+refuses weights it cannot read as shares: none at all, a negative one, or a
+set that adds up to nothing.
+
+-}
+allocateBy : Int -> Array BigDecimal -> BigDecimal -> Maybe (Array BigDecimal)
+allocateBy places weights total =
+    Maybe.map2 (largestRemainder places)
+        (unitsAt places total)
+        (shareWeights weights)
+
+
+{-| The total as a whole number of units at `places`, or `Nothing` if it is
+not one.
+
+A scale finer than `places` is the whole test, and it is exact because the
+normal form keeps no trailing zeroes: `500` arrives here as five hundreds and
+splits into hundreds, while `550` does not.
+
+-}
+unitsAt : Int -> BigDecimal -> Maybe BigInt
+unitsAt places (BigDecimal value) =
+    if value.scale <= places then
+        Just (at places value)
+
+    else
+        Nothing
+
+
+{-| One unit in the direction the total points, so that the parts of a
+negative total get their extra unit away from zero too.
+-}
+unitStep : BigInt -> BigInt
+unitStep units =
+    if BigInt.isNegative units then
+        BigInt.fromInt -1
+
+    else
+        BigInt.one
+
+
+{-| The weights as whole numbers at one shared scale, which is all the
+proportions need. `Nothing` if there are none, if one is negative, or if they
+add up to nothing, because none of the three names a share of anything.
+-}
+shareWeights : Array BigDecimal -> Maybe (Array BigInt)
+shareWeights weights =
+    let
+        parts =
+            Array.map representation weights
+
+        common =
+            Array.foldl (\part finest -> Basics.max part.scale finest) 0 parts
+
+        scaled =
+            Array.map (at common) parts
+    in
+    if Array.isEmpty scaled || Array.any BigInt.isNegative scaled then
+        Nothing
+
+    else if BigInt.isZero (Array.foldl BigInt.add BigInt.zero scaled) then
+        Nothing
+
+    else
+        Just scaled
+
+
+{-| Hand out `units` in proportion to `shares`: everybody gets their exact
+share rounded toward zero, and the units that are left over go one apiece to
+the biggest discarded fractions.
+
+The comparison is on the remainders of the same division, so no fraction is
+ever built. Ties go to the earlier weight, which is what makes equal weights
+agree with [`allocate`](#allocate), and it is written into the ordering rather
+than left to the sort being stable.
+
+-}
+largestRemainder : Int -> BigInt -> Array BigInt -> Array BigDecimal
+largestRemainder places units shares =
+    let
+        whole =
+            Array.foldl BigInt.add BigInt.zero shares
+
+        floors =
+            Array.indexedMap
+                (\index share ->
+                    when BigInt.quotRemBy whole (BigInt.mul units share) is
+                        Just answer ->
+                            { index = index
+                            , units = answer.quotient
+                            , dropped = BigInt.abs answer.remainder
+                            }
+
+                        Nothing ->
+                            -- Unreachable: `shareWeights` rejected a zero sum.
+                            { index = index, units = BigInt.zero, dropped = BigInt.zero }
+                )
+                shares
+
+        handedOut =
+            Array.foldl (\part running -> BigInt.add running part.units) BigInt.zero floors
+
+        extras =
+            BigInt.subBy handedOut units
+                |> BigInt.abs
+                |> BigInt.toInt
+                |> Maybe.withDefault 0
+
+        step =
+            unitStep units
+    in
+    floors
+        |> Array.sortWith byDropped
+        |> Array.indexedMap
+            (\rank part ->
+                if rank < extras then
+                    { part | units = BigInt.add part.units step }
+
+                else
+                    part
+            )
+        |> Array.sortBy .index
+        |> Array.map (\part -> make part.units places)
+
+
+byDropped :
+    { index : Int, units : BigInt, dropped : BigInt }
+    -> { index : Int, units : BigInt, dropped : BigInt }
+    -> Order
+byDropped a b =
+    when BigInt.compare b.dropped a.dropped is
+        EQ ->
+            Basics.compare a.index b.index
+
+        order ->
+            order
 
 
 -- ROUNDING
@@ -1271,10 +1547,10 @@ price was quoted to the cent (`1.50` and `1.5` are one value), so the number
 of places is something the formatter is told, by the code that knows what the
 number is for.
 
-Half-even because it is the rounding that does not drift, and because a
-formatter should not be making rounding decisions. If the rounding matters,
-round first and say which way: `roundTo 2 HalfUp` followed by
-`toStringWithPlaces 2` leaves this function nothing to decide.
+Half-even because it is the rounding that does not drift, which is the right
+default for a column of numbers and the wrong one for a receipt.
+[`toStringWithPlacesUsing`](#toStringWithPlacesUsing) is the same function
+with the rounding named.
 
 A count of zero gives a whole number and no point, and a negative one rounds to
 tens or hundreds and writes the zeroes out.
@@ -1282,9 +1558,39 @@ tens or hundreds and writes the zeroes out.
 -}
 toStringWithPlaces : Int -> BigDecimal -> String
 toStringWithPlaces places value =
+    toStringWithPlacesUsing places HalfEven value
+
+
+{-| [`toStringWithPlaces`](#toStringWithPlaces) with the rounding said out
+loud: `toStringWithPlacesUsing places rounding value`.
+
+    BigDecimal.fromString "2.345"
+        |> Maybe.map (BigDecimal.toStringWithPlacesUsing 2 BigDecimal.HalfUp)
+    --> Just "2.35"
+
+    BigDecimal.fromString "2.345"
+        |> Maybe.map (BigDecimal.toStringWithPlaces 2)
+    --> Just "2.34"
+
+Both of those are correct, and they answer different questions. Half-even is
+the better default because ties fall both ways, so a long column of rounded
+numbers does not drift upwards; that is why it is the one the plain function
+uses, and why a report should keep it. But a price is not a column. Shops,
+invoices and most tax authorities round a half away from zero, and a total
+that disagrees with the arithmetic a customer did by hand is a support ticket
+whatever IEEE 754 has to say about it.
+
+So `HalfEven` for a report, `HalfUp` for a receipt, and this is where you say
+which. Nothing is rounded but the text: use [`roundTo`](#roundTo) if the
+value itself should change, and note that a value rounded to `places`
+already will come out the same through either function.
+
+-}
+toStringWithPlacesUsing : Int -> Rounding -> BigDecimal -> String
+toStringWithPlacesUsing places rounding value =
     let
         rounded =
-            roundTo places HalfEven value
+            roundTo places rounding value
     in
     if places <= 0 then
         toString rounded

@@ -2,7 +2,7 @@ module Main exposing (main)
 
 {-| The test suite.
 
-Five kinds of test, in the order they catch things:
+Six kinds of test, in the order they catch things:
 
   - `Differential` runs every operation twice, once through `BigInt` and once
     through Gren's own `Int`, over every small pair and over pairs straddling
@@ -15,6 +15,8 @@ Five kinds of test, in the order they catch things:
   - `Decimals` covers `BigDecimal` -- the normal form that makes `==` numeric
     equality, the arithmetic that never rounds, and the seven roundings, all
     against Python's `decimal`.
+  - `Cart` runs a checkout end to end, which is the only place the order the
+    operations go in is under test.
 
 Run with `./run.sh`.
 
@@ -22,6 +24,7 @@ Run with `./run.sh`.
 
 import BigNumbers exposing (bigNumbersSuite)
 import Bits exposing (bitsSuite)
+import Cart exposing (cartSuite)
 import Decimals exposing (decimalsSuite)
 import Differential exposing (differentialSuite)
 import Node
@@ -40,5 +43,6 @@ main =
             , bitsSuite
             , stringsSuite
             , decimalsSuite
+            , cartSuite
             ]
         }

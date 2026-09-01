@@ -262,15 +262,18 @@ does.
 A value is an unscaled `BigInt` and a power of ten: `unscaled * 10^-scale`.
 There is no fixed precision anywhere, so `add`, `subBy` and `mul` never round.
 They widen. The only operation that can fail to terminate is division, and
-division and `roundTo` are the only operations that take a rounding mode.
+division and `roundTo` are the only operations that round a value.
+`toStringWithPlacesUsing` takes a rounding mode too, but only to write a value
+down.
 
 | | |
 |---|---|
-| arithmetic | `add` `subBy` `mul` `negate` `abs` `powBy` |
+| arithmetic | `add` `sum` `subBy` `mul` `negate` `abs` `powBy` |
 | division | `divBy` exact or `Nothing`, `divByTo` to a number of places |
+| splitting | `allocate` into equal parts, `allocateBy` in proportion, both adding back up |
 | rounding | `roundTo`, and the seven `Rounding` modes |
 | comparison | `compare` `isZero` `isNegative` `isInteger` `max` `min` |
-| text | `fromString` `toString` `toStringWithPlaces`, and `fromStringWithin` for text you did not write |
+| text | `fromString` `toString` `toStringWithPlaces` `toStringWithPlacesUsing`, and `fromStringWithin` for text you did not write |
 | numbers | `fromInt` `toInt` `fromBigInt` `toBigInt` `fromFloat` `toFloat` |
 | representation | `scale` `unscaled` `movePointBy` |
 
@@ -320,6 +323,41 @@ BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3
 --> Just 0.33333
 ```
 
+### Splitting a total
+
+Dividing answers "what is one share" and answers it for one share at a time,
+which is why the shares stop adding up. Ten pounds in three is `3.33` to the
+cent however it is rounded, and three of those is `9.99`. The missing penny is
+not a rounding to be tuned away -- at two places there is no answer that works
+-- so somebody has to be given it.
+
+```gren
+BigDecimal.fromString "10.00" |> Maybe.andThen (BigDecimal.allocate 2 3)
+--> Just [ 3.34, 3.33, 3.33 ]
+```
+
+The first argument is where the smallest unit sits: `2` for a currency with
+cents, `0` for one without. The parts differ by one unit at most, the earliest
+take the extra, and they add up to what you passed in.
+
+`allocateBy` does the same in proportion to a set of weights, which is the one
+a shopping cart wants -- an order-level discount has to come off the lines,
+and it has to come off them exactly, or the lines stop explaining the total:
+
+```gren
+BigDecimal.allocateBy 2 [ line1, line2, line3 ] discount
+```
+
+Each part is its exact share rounded toward zero, and the units left over go
+to the parts whose discarded fractions were biggest. That is the
+largest-remainder method. Weights are relative, so `[ 1, 1, 2 ]` and
+`[ 25, 25, 50 ]` split alike.
+
+Both refuse a total that is not a whole number of units at that many places,
+rather than rounding it quietly: `allocate 2` will not split `10.005`, because
+a third of a cent is not something to hand anybody. Round it first, and own
+the rounding.
+
 ### The seven roundings
 
 `Up` and `Down` ignore how close the value was to the boundary. `Ceiling` and
@@ -365,8 +403,13 @@ Python's eighth mode, `ROUND_05UP`, is not here, and neither is Java's
 `UNNECESSARY`: `divBy` returning `Nothing` is what that one is for.
 
 Where this module has to round without being asked, inside
-`toStringWithPlaces`, it uses `HalfEven`. Splitting ties in both directions
-is what keeps a long column of rounded numbers from drifting upward.
+`toStringWithPlaces`, it uses `HalfEven`. Splitting ties in both directions is
+what keeps a long column of rounded numbers from drifting upward. A price is
+not a column, though: shops, invoices and most tax authorities round a half
+away from zero, and a total that disagrees with the arithmetic a customer did
+by hand is a support ticket whatever IEEE 754 says. `toStringWithPlacesUsing`
+is the same function with the mode named -- `HalfEven` for a report, `HalfUp`
+for a receipt.
 
 ### The example that makes the case
 
@@ -687,7 +730,7 @@ afford to, because it gets to write its own `equals`.
 cd tests && ./run.sh
 ```
 
-Five suites, in the order they catch things:
+Six suites, in the order they catch things:
 
 - **Differential** runs every operation twice, once through `BigInt` and once
   through Gren's own `Int`, over every pair in −24…24 and over pairs
@@ -699,5 +742,9 @@ Five suites, in the order they catch things:
 - **Strings** covers parsing and formatting in every base from 2 to 36,
   including the inputs that must be refused.
 - **Decimals** covers `BigDecimal`: the normal form that makes `==` numeric
-  equality, arithmetic a `Float` gets visibly wrong, and all seven roundings
-  on the ties where they disagree, against Python's `decimal`.
+  equality, arithmetic a `Float` gets visibly wrong, all seven roundings on
+  the ties where they disagree, and the two allocations, against Python's
+  `decimal`.
+- **Cart** runs a checkout end to end -- line totals, a discount shared over
+  the lines, tax on what is left, the total split three ways -- because the
+  order the operations go in is the thing a per-function test cannot check.

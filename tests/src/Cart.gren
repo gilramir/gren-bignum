@@ -1,0 +1,267 @@
+module Cart exposing (cartSuite)
+
+{-| A shopping cart, from the prices to the receipt.
+
+The other suites test one function at a time. This one runs a checkout end to
+end: line totals, an order-level discount that has to come off the lines and
+still add up to itself, tax on what is left, a grand total split three ways,
+and the two edges where a number meets a person -- the text they typed and the
+text on the receipt.
+
+The expected values come from Python's `decimal`, as they do in
+[`Decimals`](Decimals). What this suite adds is the *order* the operations go
+in, because that is where a money bug actually lives. Not in `mul`. In
+rounding the tax before the discount, or in handing three people a third of a
+total that then comes to a cent more than the total did.
+
+@docs cartSuite
+
+-}
+
+import BigDecimal exposing (BigDecimal, Rounding(..))
+import Expect
+import Maybe exposing (Maybe(..))
+import Task
+import Test.Runner.UnitNode as U
+
+
+-- THE CART
+
+
+type alias Line =
+    { name : String
+    , qty : Int
+    , price : BigDecimal
+    }
+
+
+lines : Array Line
+lines =
+    [ { name = "notebook", qty = 3, price = dec "19.99" }
+    , { name = "pen", qty = 1, price = dec "4.95" }
+    , { name = "eraser", qty = 2, price = dec "0.99" }
+    ]
+
+
+{-| What each line costs before anything is taken off it. Exact: a quantity is
+a whole number and a price has two places, so nothing here can round.
+-}
+extended : Array BigDecimal
+extended =
+    Array.map (\line -> BigDecimal.mul (BigDecimal.fromInt line.qty) line.price) lines
+
+
+subtotal : BigDecimal
+subtotal =
+    BigDecimal.sum extended
+
+
+{-| Fifteen per cent off the order. The rounding happens once, here, before
+anything is shared out: `10.035` is not a discount anybody can be given, and
+the decision to make it `10.04` belongs to the shop rather than to a formatter
+further down.
+-}
+discount : BigDecimal
+discount =
+    BigDecimal.mul subtotal (dec "0.15")
+        |> BigDecimal.roundTo 2 HalfUp
+
+
+{-| The discount spread over the lines in proportion to what they cost. This
+is the step that has no answer without `allocateBy`: the exact shares are
+`9.0045`, `0.7433...` and `0.2971...`, and rounding each of them on its own
+gives a set of numbers that no longer comes to `10.04`.
+-}
+discountPerLine : Array BigDecimal
+discountPerLine =
+    when BigDecimal.allocateBy 2 extended discount is
+        Just shares ->
+            shares
+
+        Nothing ->
+            -- Unreachable: the discount was rounded to two places above, and
+            -- the weights are prices. A failure here shows up as a subtotal
+            -- of nothing, which every test below will notice.
+            []
+
+
+netLines : Array BigDecimal
+netLines =
+    Array.map2 (\line share -> line |> BigDecimal.subBy share) extended discountPerLine
+
+
+netTotal : BigDecimal
+netTotal =
+    BigDecimal.sum netLines
+
+
+{-| Tax on what is actually being charged, rounded the way a till rounds.
+-}
+tax : BigDecimal
+tax =
+    BigDecimal.mul netTotal (dec "0.0825")
+        |> BigDecimal.roundTo 2 HalfUp
+
+
+grandTotal : BigDecimal
+grandTotal =
+    BigDecimal.add netTotal tax
+
+
+{-| A price a supplier quoted in tenths of a cent, which is where the two
+roundings part company.
+-}
+awkwardPrice : BigDecimal
+awkwardPrice =
+    BigDecimal.mul (BigDecimal.fromInt 3) (dec "3.015")
+
+
+-- THE SUITE
+
+
+{-| -}
+cartSuite : U.Suite
+cartSuite =
+    U.suite
+        { name = "Cart"
+        , setUpSuite = U.noSuiteFixture
+        , tearDownSuite = U.noTearDown
+        , setUp = \_ -> Task.succeed {}
+        , tearDown = U.noTearDown
+        , tests =
+            [ U.test "the lines come to a subtotal" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        { lines = [ "59.97", "4.95", "1.98" ], subtotal = "66.9" }
+                        { lines = Array.map text extended, subtotal = text subtotal }
+                    )
+            , U.test "fifteen per cent off is rounded once, before it is shared out" <| \_ ->
+                Task.succeed
+                    (Expect.equal { exact = "10.035", charged = "10.04" }
+                        { exact = text (BigDecimal.mul subtotal (dec "0.15"))
+                        , charged = text discount
+                        }
+                    )
+            , U.test "and the shares of it still come to it" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        { shares = [ "9", "0.74", "0.3" ], sum = "10.04" }
+                        { shares = Array.map text discountPerLine
+                        , sum = text (BigDecimal.sum discountPerLine)
+                        }
+                    )
+            , U.test "so the lines still explain the total" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        { lines = [ "50.97", "4.21", "1.68" ], total = "56.86" }
+                        { lines = Array.map text netLines, total = text netTotal }
+                    )
+            , U.test "tax goes on what is being charged, not on what was asked" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        { exact = "4.69095", charged = "4.69", total = "61.55" }
+                        { exact = text (BigDecimal.mul netTotal (dec "0.0825"))
+                        , charged = text tax
+                        , total = text grandTotal
+                        }
+                    )
+            , U.test "the total splits three ways and is still the total" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        (Just { parts = [ "20.52", "20.52", "20.51" ], sum = "61.55" })
+                        (BigDecimal.allocate 2 3 grandTotal
+                            |> Maybe.map
+                                (\parts ->
+                                    { parts = Array.map text parts
+                                    , sum = text (BigDecimal.sum parts)
+                                    }
+                                )
+                        )
+                    )
+            -- Dividing answers for one payer at a time and cannot see the
+            -- other two. Down is a cent short of the total and HalfUp is a
+            -- cent over it; neither is a rounding to be fixed by choosing
+            -- better, because at two places there is no answer that works.
+            , U.test "which dividing cannot do, whichever way it rounds" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "61.56", Just "61.53" ]
+                        [ threeWays HalfUp, threeWays Down ]
+                    )
+            , U.test "a receipt rounds half up, a report rounds half even" <| \_ ->
+                Task.succeed
+                    (Expect.equal { receipt = "9.05", report = "9.04", exact = "9.045" }
+                        { receipt = BigDecimal.toStringWithPlacesUsing 2 HalfUp awkwardPrice
+                        , report = BigDecimal.toStringWithPlaces 2 awkwardPrice
+                        , exact = text awkwardPrice
+                        }
+                    )
+            , U.test "the receipt pads what the value does not carry" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "10.04", "0.30", "9.00" ]
+                        (Array.map (BigDecimal.toStringWithPlacesUsing 2 HalfUp)
+                            [ discount
+                            , dec "0.3"
+                            , dec "9"
+                            ]
+                        )
+                    )
+            , U.test "the total stores as cents and comes back the same number" <| \_ ->
+                Task.succeed
+                    (Expect.equal { cents = Just 6155, back = True }
+                        { cents = BigDecimal.toInt (BigDecimal.movePointBy 2 grandTotal)
+                        , back = BigDecimal.movePointBy -2 (BigDecimal.fromInt 6155) == grandTotal
+                        }
+                    )
+            , U.test "free shipping over fifty, which is a comparison and not a Float" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ GT, LT ]
+                        [ BigDecimal.compare subtotal (dec "50")
+                        , BigDecimal.compare (dec "49.99") (dec "50")
+                        ]
+                    )
+            -- The parser will not guess whether a comma is a point. The app
+            -- knows the locale and the parser does not, so the stripping
+            -- happens here, at the edge, before the number exists.
+            , U.test "what a person types is not yet a number" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        { raw = Nothing, american = Just "1234.56", german = Just "1234.56" }
+                        { raw = Maybe.map text (BigDecimal.fromString "1,234.56")
+                        , american =
+                            "1,234.56"
+                                |> String.replace "," ""
+                                |> BigDecimal.fromString
+                                |> Maybe.map text
+                        , german =
+                            "1.234,56"
+                                |> String.replace "." ""
+                                |> String.replace "," "."
+                                |> BigDecimal.fromString
+                                |> Maybe.map text
+                        }
+                    )
+            ]
+        }
+
+
+-- HELPERS
+
+
+dec : String -> BigDecimal
+dec source =
+    BigDecimal.fromString source
+        |> Maybe.withDefault BigDecimal.zero
+
+
+text : BigDecimal -> String
+text =
+    BigDecimal.toString
+
+
+{-| The grand total divided three ways rather than allocated, and added back
+up: the sum that is not the total.
+-}
+threeWays : Rounding -> Maybe String
+threeWays rounding =
+    BigDecimal.divByTo 2 rounding (BigDecimal.fromInt 3) grandTotal
+        |> Maybe.map (\share -> text (BigDecimal.sum [ share, share, share ]))
