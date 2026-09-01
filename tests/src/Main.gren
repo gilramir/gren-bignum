@@ -2,7 +2,7 @@ module Main exposing (main)
 
 {-| The test suite.
 
-Four kinds of test, in the order they catch things:
+Five kinds of test, in the order they catch things:
 
   - `Differential` runs every operation twice, once through `BigInt` and once
     through Gren's own `Int`, over every small pair and over pairs straddling
@@ -12,6 +12,9 @@ Four kinds of test, in the order they catch things:
   - `Bits` covers the two's-complement reading of negative numbers and the
     fixed-width views, against what Python gives for the same expressions.
   - `Strings` covers parsing and formatting, including the refusals.
+  - `Decimals` covers `BigDecimal` -- the normal form that makes `==` numeric
+    equality, the arithmetic that never rounds, and the seven roundings, all
+    against Python's `decimal`.
 
 Run with `./run.sh`.
 
@@ -19,6 +22,7 @@ Run with `./run.sh`.
 
 import BigNumbers exposing (bigNumbersSuite)
 import Bits exposing (bitsSuite)
+import Decimals exposing (decimalsSuite)
 import Differential exposing (differentialSuite)
 import Node
 import Strings exposing (stringsSuite)
@@ -28,12 +32,13 @@ import Test.Runner.UnitNode as U
 main : Node.SimpleProgram a
 main =
     U.run
-        { name = "gren-bigint"
+        { name = "gren-bignum"
         , version = "1.0.0"
         , suites =
             [ differentialSuite
             , bigNumbersSuite
             , bitsSuite
             , stringsSuite
+            , decimalsSuite
             ]
         }

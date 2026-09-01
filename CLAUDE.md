@@ -5,11 +5,16 @@ code in this repository.
 
 ## About this project
 
-`gren-bigint` is a [Gren](https://gren-lang.org/) package providing
-arbitrary-precision integers, plus the fixed-width views (`maskTo`,
-`toSigned`, `fitsSigned`, `fitsUnsigned`) that let a program work in `uint64`
-or `int32` without a separate numeric type. All library code is in
-`src/BigInt.gren`. [README.md](README.md) says what it does and why.
+`gren-bignum` is a [Gren](https://gren-lang.org/) package with two modules.
+`src/BigInt.gren` is arbitrary-precision integers, plus the fixed-width views
+(`maskTo`, `toSigned`, `fitsSigned`, `fitsUnsigned`) that let a program work in
+`uint64` or `int32` without a separate numeric type. `src/BigDecimal.gren` is
+exact decimals built on top of it: an unscaled `BigInt` and a power of ten.
+[README.md](README.md) says what they do and why.
+
+`BigDecimal` uses nothing of `BigInt` but its public API, which is deliberate
+— there is no `Internal` module and no reason for one. If a decimal operation
+seems to need the limbs, it is the wrong operation.
 
 ## Commands
 
@@ -18,7 +23,7 @@ Everything runs inside devbox; `gren` and node 22 are not on `PATH` otherwise.
 ```sh
 devbox run build    # compile the package
 devbox run docs     # check the doc comments parse
-devbox run test     # tests/run.sh: 76 checks, ~1s
+devbox run test     # tests/run.sh: 126 checks, ~1s
 ```
 
 Format sources after editing them, especially after scripted edits. The
@@ -50,7 +55,7 @@ only `//`.
 
 ## Architecture
 
-`src/BigInt.gren` is in four layers, in this order down the file:
+### src/BigInt.gren, in four layers, in this order down the file
 
 1. **The type and conversions.** Sign and magnitude: a `Bool` and an array of
    24-bit limbs, little-endian, normalised so there are no leading zero limbs
@@ -66,10 +71,35 @@ only `//`.
    a field one limb wider than either, applies the operation limb by limb,
    and converts back. `complement` needs none of that: `~x` is `-x - 1`.
 
+
+### src/BigDecimal.gren
+
+A `BigInt` and an `Int` scale, meaning `unscaled * 10^-scale`. Three things
+govern it:
+
+1. **`make` strips trailing zeroes**, so each value has one representation and
+   `==` is numeric equality. This is the invariant everything else assumes:
+   `isInteger` is `scale <= 0` only because of it, and `compare` agreeing with
+   `==` is the whole reason it was chosen over Java's scale-preserving
+   semantics. The stripping goes seven zeroes at a time (10^7, the largest
+   power of ten inside a 24-bit limb) before falling back to one at a time.
+2. **Nothing but division rounds.** `add` widens both operands to the finer
+   scale, `mul` adds the scales. `Rounding` appears in exactly two places,
+   `roundTo` and `divByTo`, and both go through `roundedQuotient`, which is one
+   truncating `BigInt` division plus a conditional step away from zero.
+3. **`divBy` is exact or `Nothing`**, and the test needs no gcd: write the
+   divisor as `2^a * 5^b * m`, and `n / d` terminates exactly when `d` divides
+   `n * 10^k` for `k = max a b`. `terminatingShift` finds that `k`, and the one
+   division both tests the question and produces the digits.
+
+`fromFloat` is exact — the double's real value, not the number that was typed
+— which is the same stance `BigInt.fromFloat` takes and is worth preserving.
+`fromString` is the door for a number a person wrote.
+
 ## Tests
 
 `tests/` is a separate Gren application depending on this package through
-`"local:../"`, run with `gilramir/gren-unit-node`. Four suites, and the split
+`"local:../"`, run with `gilramir/gren-unit-node`. Five suites, and the split
 matters:
 
 - `Differential.gren` — the same sums twice, through `BigInt` and through
@@ -80,6 +110,13 @@ matters:
   implementation.
 - `Bits.gren` — against Python, which defines these operations the same way.
 - `Strings.gren` — round trips in every base, and the refusals.
+- `Decimals.gren` — `BigDecimal`, against Python's `decimal`, which is the
+  same representation and the same seven roundings. The rounding tests are a
+  row of seven values per mode, because six of the seven modes agree about
+  `2.4` and only disagree at `2.5`.
 
-When adding an operation, add it to the differential suite first: it is the one
-that finds sign and zero bugs without anybody having to think of them.
+When adding a `BigInt` operation, add it to the differential suite first: it is
+the one that finds sign and zero bugs without anybody having to think of them.
+There is no differential suite for `BigDecimal` and there cannot be a useful
+one — a Gren `Float` is the thing it exists to disagree with — so its
+expected values come from Python instead, and new ones should too.

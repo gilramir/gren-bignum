@@ -1,15 +1,26 @@
-# gren-bigint
+# gren-bignum
 
-Arbitrary-precision integers for [Gren](https://gren-lang.org), and the
-fixed-width views of them that a programmer actually asks for.
+Numbers for [Gren](https://gren-lang.org) that a `Float` cannot hold:
+arbitrary-precision integers with the fixed-width views a programmer actually
+asks for, and exact decimals built on top of them.
 
 ```gren
 import BigInt
+import BigDecimal
 
 BigInt.fromString "0xFFFFFFFFFFFFFFFF"
     |> Maybe.map BigInt.toString
     --> Just "18446744073709551615"
+
+BigDecimal.fromString "0.1"
+    |> Maybe.map (\d -> BigDecimal.add d d |> BigDecimal.add d)
+    |> Maybe.map BigDecimal.toString
+    --> Just "0.3"
 ```
+
+Two modules, and the second is the first with a power of ten attached.
+[`BigInt`](#what-is-in-bigint) is the whole of the arithmetic;
+[`BigDecimal`](#bigdecimal) is a `BigInt` and a scale.
 
 ## Why
 
@@ -51,7 +62,7 @@ x |> BigInt.fitsSigned 64    -- would it have overflowed?
 `maskTo` wraps the way a register does, so `maskTo 64 (fromInt -1)` is
 `18446744073709551615` and `toSigned 64` of that is `-1` again.
 
-## What is in it
+## What is in `BigInt`
 
 | | |
 |---|---|
@@ -133,6 +144,101 @@ a |> BigInt.shiftLeftBy 8      -- a << 8
 `compare` is the exception, and for the same reason: it stands in for
 `Basics.compare`, so it takes its arguments the way that one does.
 
+## BigDecimal
+
+A `Float` cannot hold `0.1`. What it holds instead is
+`0.1000000000000000055511151231257827`, which is close enough right up until
+you add three of them and get `0.30000000000000004`. That is not a bug in the
+addition — base two has no exact `0.1` to add. `BigDecimal` is base ten, so it
+does.
+
+A value is an unscaled `BigInt` and a power of ten: `unscaled * 10^-scale`.
+Nothing about the precision is fixed anywhere, so `add`, `subBy` and `mul`
+never round — they widen. Only division can fail to terminate, and only
+division and `roundTo` take a rounding.
+
+| | |
+|---|---|
+| arithmetic | `add` `subBy` `mul` `negate` `abs` `powBy` |
+| division | `divBy` exact-or-nothing, `divByTo` to a number of places |
+| rounding | `roundTo`, and the seven `Rounding` modes |
+| comparison | `compare` `isZero` `isNegative` `isInteger` `max` `min` |
+| text | `fromString` `toString` `toStringWithPlaces` |
+| numbers | `fromInt` `toInt` `fromBigInt` `toBigInt` `fromFloat` `toFloat` |
+| representation | `scale` `unscaled` `movePointBy` |
+
+### One value, one representation
+
+`1.50` and `1.5` are the same number, and here they are also the same value:
+every `BigDecimal` is built through a constructor that strips trailing zeroes.
+
+```gren
+BigDecimal.fromString "1.50" == BigDecimal.fromString "1.5"   -- True
+```
+
+This is the opposite of `java.math.BigDecimal`, where the two are equal in
+value but distinct objects and `equals` says `False`. The reason to differ is
+that Gren's `==` is structural and cannot be overridden. A type whose `==`
+disagrees with its `compare` is a trap laid in the language's most-used
+operator, and no amount of documentation gets it back.
+
+What you give up is the scale as a record of significance — a `BigDecimal` does
+not remember that a price was quoted to the cent. Ask for that at the edge,
+where it is a formatting question:
+
+```gren
+BigDecimal.toStringWithPlaces 2 price   --> "1.50"
+```
+
+### Both divisions, again, for a different reason
+
+`BigInt` has two divisions because a programmer gets asked both. `BigDecimal`
+has two because a decimal division either comes out or it does not, and which
+of those you can live with is not something a library can decide.
+
+```gren
+BigDecimal.one |> BigDecimal.divBy (BigDecimal.fromInt 8)   -- Just 0.125
+BigDecimal.one |> BigDecimal.divBy (BigDecimal.fromInt 3)   -- Nothing
+```
+
+`divBy` is exact or nothing, and the `Nothing` is worth having: a quotient
+terminates in base ten only when the reduced divisor is made of twos and
+fives, and if you were expecting `1/3` to be a number, you have a bug either
+way. `divByTo` is the one that always answers, because you have told it how
+many places and what to do with the last one.
+
+```gren
+BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3)
+--> Just 0.33333
+```
+
+### The seven roundings
+
+`Up` and `Down` ignore how close the value was; `Ceiling` and `Floor` mind the
+sign of the number; `HalfUp`, `HalfDown` and `HalfEven` all go to the nearer
+value and differ only on an exact tie. They are Python's `decimal` roundings
+under Java's names, and the test suite checks all seven against Python.
+
+`HalfEven` is the default anywhere this module has to round without being
+asked — inside `toStringWithPlaces` — because ties falling both ways is what
+keeps a long column of rounded numbers from drifting upward.
+
+### The example that makes the case
+
+```gren
+BigDecimal.fromString "2.675" |> Maybe.map (BigDecimal.roundTo 2 BigDecimal.HalfUp)
+--> Just 2.68
+
+BigDecimal.fromFloat 2.675 |> Maybe.map (BigDecimal.roundTo 2 BigDecimal.HalfUp)
+--> Just 2.67
+```
+
+Both are right. The nearest double to `2.675` is `2.67499999999999982...`,
+which is below the tie and rounds down, and every language that rounds a
+`Float` gives `2.67` and gets blamed for its rounding. `fromString` gives the
+number that was written and `fromFloat` gives the number the machine has, and
+the two disagreeing is the whole reason to have a decimal type.
+
 ## How it works
 
 Sign and magnitude: a `Bool` and an array of 24-bit limbs, least significant
@@ -145,6 +251,16 @@ Multiplication is long multiplication a row at a time. Division is Knuth's
 Algorithm D, written as a fold rather than as mutation of a scratch buffer,
 with both operands normalised first so the trial quotient is never more than
 two too high.
+
+`BigDecimal` adds nothing to that. It is a `BigInt` and an `Int` scale, and
+every operation is a scale adjustment and then the integer operation: `add`
+widens both to the finer scale, `mul` adds the scales, and the roundings are a
+single truncating division with one conditional step away from zero. The only
+piece with any arithmetic of its own is the test for whether an exact division
+terminates, and that turns out to need no greatest common divisor: writing the
+divisor as `2^a * 5^b * m`, the quotient `n / d` terminates exactly when
+`d` divides `n * 10^k` for `k = max a b`, so asking for that one division both
+tests the question and produces the digits.
 
 ## Where the technique comes from
 
@@ -178,6 +294,15 @@ them is slicing instead of repeated division. For a package whose reason to
 exist is looking at values in hex, that is the right way round — but it is a
 choice among standard ones, not a new one.
 
+**The decimal representation is not ours either.** An unscaled integer and a
+decimal exponent is what `java.math.BigDecimal` is, what Python's `decimal`
+module is, and what IEEE 754-2008 standardised as a decimal format. The seven
+roundings are that standard's, under Java's names for them. The one choice
+made here rather than inherited is stripping trailing zeroes so that `==` is
+numeric equality, and that is a concession to Gren's structural equality
+rather than a better idea — Java keeps the scale and can afford to, because it
+has an `equals` it is allowed to write itself.
+
 ### References
 
 - Donald E. Knuth, *The Art of Computer Programming*, Vol. 2: *Seminumerical
@@ -185,6 +310,12 @@ choice among standard ones, not a new one.
 - CPython, [`Include/cpython/longintrepr.h`][cpython] — 30-bit digits, and the
   constraints on `PyLong_SHIFT` that decide them.
 - [bn.js][bnjs] — 26-bit limbs, the same trade on the same doubles.
+- IEEE 754-2008, §3.5 — decimal formats as a significand and an exponent, and
+  the rounding-direction attributes.
+- Python's [`decimal`][pydecimal] module — the implementation the `Decimals`
+  suite checks against.
+
+[pydecimal]: https://docs.python.org/3/library/decimal.html
 
 [cpython]: https://github.com/python/cpython/blob/main/Include/cpython/longintrepr.h
 [bnjs]: https://github.com/indutny/bn.js/
@@ -195,7 +326,7 @@ choice among standard ones, not a new one.
 cd tests && ./run.sh
 ```
 
-Four kinds, in the order they catch things:
+Five kinds, in the order they catch things:
 
 - **Differential** runs every operation twice — once through `BigInt`, once
   through Gren's own `Int` — over every pair in −24…24 and over pairs
@@ -206,3 +337,7 @@ Four kinds, in the order they catch things:
   views, against what Python gives for the same expressions.
 - **Strings** covers parsing and formatting in every base from 2 to 36,
   including the refusals.
+- **Decimals** covers `BigDecimal`: the normal form that makes `==` numeric
+  equality, arithmetic a `Float` gets visibly wrong, and all seven roundings on
+  the ties where they disagree — against Python's `decimal`, which is the same
+  idea implemented by people who had to get it right.

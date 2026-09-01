@@ -1,0 +1,590 @@
+module Decimals exposing (decimalsSuite)
+
+{-| Exact decimals: the arithmetic, the roundings, and the normal form.
+
+The expected values here come from Python's `decimal` module, which is an
+implementation of the same idea by people who had to get it right -- an
+unscaled integer over a power of ten, and the same seven roundings under
+different names. If `2.5` rounds half-even to `2` there and to `3` here, this
+package is wrong and not merely different.
+
+Three things are being checked, and they fail in different ways:
+
+  - **The normal form.** Trailing zeroes come off, so `==` is numeric equality.
+    This is the property everything else is arranged around, and it is the one
+    that breaks silently: a stray zero makes two equal numbers compare unequal
+    in the one operator nobody thinks to distrust.
+  - **The arithmetic**, which never rounds, against values a `Float` gets
+    visibly wrong.
+  - **The roundings**, all seven, on the ties and near-ties where they
+    disagree. Six of the seven agree about `2.4`; they are only worth testing
+    at `2.5`.
+
+@docs decimalsSuite
+
+-}
+
+import BigDecimal exposing (BigDecimal, Rounding(..))
+import BigInt
+import Expect
+import Maybe exposing (Maybe(..))
+import String
+import Task
+import Test.Runner.UnitNode as U
+
+
+{-| -}
+decimalsSuite : U.Suite
+decimalsSuite =
+    U.suite
+        { name = "Decimals"
+        , setUpSuite = U.noSuiteFixture
+        , tearDownSuite = U.noTearDown
+        , setUp = \_ -> Task.succeed {}
+        , tearDown = U.noTearDown
+        , tests =
+            -- THE NORMAL FORM
+            [ U.test "trailing zeroes come off, so == is numeric equality" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, True, True, True ]
+                        [ dec "1.50" == dec "1.5"
+                        , dec "2.00" == dec "2"
+                        , dec "0.000" == Just BigDecimal.zero
+                        , dec "1e2" == dec "100"
+                        ]
+                    )
+            , U.test "and compare agrees with it everywhere" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just EQ, Just EQ, Just LT, Just GT ]
+                        [ cmp "1.50" "1.5"
+                        , cmp "-0.0" "0"
+                        , cmp "1.5" "1.51"
+                        , cmp "-1.5" "-1.51"
+                        ]
+                    )
+            , U.test "there is one zero, whichever way you reach it" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ True, True, True, True ]
+                        [ isZeroOf (sub "1.5" "1.5")
+                        , isZeroOf (mul "0" "12345.678")
+                        , dec "-0.00" == Just BigDecimal.zero
+                        , BigDecimal.negate BigDecimal.zero == BigDecimal.zero
+                        ]
+                    )
+            , U.test "the scale is the one the value needs, and may be negative" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just 1, Just 1, Just -2, Just 0, Just 9 ]
+                        [ Maybe.map BigDecimal.scale (dec "1.5")
+                        , Maybe.map BigDecimal.scale (dec "1.50")
+                        , Maybe.map BigDecimal.scale (dec "100")
+                        , Maybe.map BigDecimal.scale (dec "0.000")
+                        , Maybe.map BigDecimal.scale (dec "1e-9")
+                        ]
+                    )
+            , U.test "and the unscaled value is what is left of the digits" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "-125", Just "1", Just "15" ]
+                        [ Maybe.map (BigInt.toString << BigDecimal.unscaled) (dec "-1.25")
+                        , Maybe.map (BigInt.toString << BigDecimal.unscaled) (dec "100")
+                        , Maybe.map (BigInt.toString << BigDecimal.unscaled) (dec "1.50")
+                        ]
+                    )
+            -- ARITHMETIC
+            , U.test "the addition a Float cannot do" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "0.3") (add "0.1" "0.2"))
+            , U.test "ten tenths are one, and not 0.9999999999999999" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "1")
+                        (Maybe.map (\d -> text (repeatAdd 10 d BigDecimal.zero)) (dec "0.1"))
+                    )
+            , U.test "addition carries at the finer of the two scales" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1.001", Just "100.5", Just "0" ]
+                        [ add "1" "0.001"
+                        , add "100" "0.5"
+                        , add "-1.5" "1.50"
+                        ]
+                    )
+            , U.test "subtraction is addition of the negative, including at zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0.9", Just "-0.9", Just "0" ]
+                        [ sub "1" "0.1"
+                        , sub "0.1" "1"
+                        , sub "0.1" "0.100"
+                        ]
+                    )
+            , U.test "multiplication adds the scales and never rounds" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "121932631356500531.347203169112635269"
+                        , Just "27670116110564327425.5"
+                        , Just "0.0001"
+                        ]
+                        [ mul "123456789.123456789" "987654321.987654321"
+                        , mul "18446744073709551617" "1.5"
+                        , mul "0.01" "0.01"
+                        ]
+                    )
+            , U.test "negate and abs leave the digits alone" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "-1.5", Just "1.5", Just "1.5", Just "0" ]
+                        [ Maybe.map (text << BigDecimal.negate) (dec "1.5")
+                        , Maybe.map (text << BigDecimal.abs) (dec "-1.5")
+                        , Maybe.map (text << BigDecimal.abs) (dec "1.5")
+                        , Just (text (BigDecimal.negate BigDecimal.zero))
+                        ]
+                    )
+            , U.test "a power is exact however many digits it takes" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1.62889462677744140625", Just "1", Just "0.125" ]
+                        [ Maybe.map (text << BigDecimal.powBy 10) (dec "1.05")
+                        , Maybe.map (text << BigDecimal.powBy 0) (dec "1.05")
+                        , Maybe.map (text << BigDecimal.powBy -3) (dec "2")
+                        ]
+                    )
+            -- The documented refusal: a negative power that does not
+            -- terminate is zero, and divByTo is the way to ask for it.
+            , U.test "and a negative power that does not terminate is zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "0")
+                        (Maybe.map (text << BigDecimal.powBy -1) (dec "3"))
+                    )
+            -- DIVIDING EXACTLY
+            , U.test "an exact division comes out" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "0.125", Just "0.5", Just "0.021875", Just "0.00016", Just "-0.875" ]
+                        [ div "1" "8"
+                        , div "3" "6"
+                        , div "7" "320"
+                        , div "1" "6250"
+                        , div "-7" "8"
+                        ]
+                    )
+            , U.test "an inexact one is Nothing rather than a wrong answer" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing ]
+                        [ div "1" "3"
+                        , div "1" "7"
+                        , div "10" "3"
+                        ]
+                    )
+            , U.test "so is a division by zero, in either shape" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing, Nothing ]
+                        [ div "1" "0"
+                        , div "0" "0.00"
+                        , Maybe.map2 (\a b -> a |> BigDecimal.divByTo 5 HalfEven b) (dec "1") (dec "0")
+                            |> Maybe.andThen identity
+                            |> Maybe.map text
+                        ]
+                    )
+            , U.test "a divisor of only twos and fives terminates however big" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "0.0000000000000000000000000000007888609052210118054117285652827862296732064351090230047702789306640625"
+                        , Just "18014398509481984.0009765625"
+                        , Just "100"
+                        ]
+                        [ Maybe.map text (Maybe.andThen (\p -> BigDecimal.one |> BigDecimal.divBy p) (Maybe.map (BigDecimal.powBy 100) (dec "2")))
+                        , div "18446744073709551617" "1024"
+                        , div "100000" "1000"
+                        ]
+                    )
+            , U.test "the terminating test survives a common factor" <| \_ ->
+                Task.succeed
+                    -- 6 has a 3 in it, but the 3 cancels, so 3/6 terminates
+                    -- and 1/6 does not.
+                    (Expect.equal [ Just "0.5", Nothing, Just "0.25", Nothing ]
+                        [ div "3" "6"
+                        , div "1" "6"
+                        , div "3" "12"
+                        , div "5" "12"
+                        ]
+                    )
+            -- DIVIDING TO A NUMBER OF PLACES
+            , U.test "a division to places always has an answer" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "0.33333", Just "-0.33333", Just "3.14285714285714285714" ]
+                        [ divTo 5 HalfEven "1" "3"
+                        , divTo 5 HalfEven "-1" "3"
+                        , divTo 20 HalfEven "22" "7"
+                        ]
+                    )
+            , U.test "it rounds once, at the place asked for" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "6148914691236517205.666666666666666666666666666667"
+                        , Just "18000"
+                        , Just "0.25"
+                        ]
+                        [ divTo 30 HalfEven "18446744073709551617" "3"
+                        , divTo -3 HalfUp "123456" "7"
+                        , divTo 10 HalfEven "1" "4"
+                        ]
+                    )
+            -- The sign of the quotient is the sign of neither operand on its
+            -- own, and Ceiling and Floor are the two that notice. Four
+            -- combinations, so that a divisor's sign cannot be quietly
+            -- ignored.
+            , U.test "and it knows which way a quotient of two negatives leans" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "-0.33333", Just "-0.33334", Just "0.33334", Just "0.33333" ]
+                        [ divTo 5 Ceiling "1" "-3"
+                        , divTo 5 Floor "1" "-3"
+                        , divTo 5 Ceiling "-1" "-3"
+                        , divTo 5 Floor "-1" "-3"
+                        ]
+                    )
+            , U.test "as do Up and Down, which is the same question backwards" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "-0.33334", Just "-0.33333", Just "0.875", Just "-0.875" ]
+                        [ divTo 5 Up "1" "-3"
+                        , divTo 5 Down "1" "-3"
+                        , div "-7" "-8"
+                        , div "7" "-8"
+                        ]
+                    )
+            -- ROUNDING
+            , U.test "Up and Down ignore how close it was" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ [ "3", "4", "-3", "3", "3", "-3", "-3" ]
+                        , [ "2", "3", "-2", "2", "2", "-2", "-2" ]
+                        ]
+                        [ roundRow Up, roundRow Down ]
+                    )
+            , U.test "Ceiling and Floor mind the sign of the number" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ [ "3", "4", "-2", "3", "3", "-2", "-2" ]
+                        , [ "2", "3", "-3", "2", "2", "-3", "-3" ]
+                        ]
+                        [ roundRow Ceiling, roundRow Floor ]
+                    )
+            , U.test "the three halves differ only on a tie" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ [ "3", "4", "-3", "2", "3", "-3", "-2" ]
+                        , [ "2", "3", "-2", "2", "3", "-3", "-2" ]
+                        , [ "2", "4", "-2", "2", "3", "-3", "-2" ]
+                        ]
+                        [ roundRow HalfUp, roundRow HalfDown, roundRow HalfEven ]
+                    )
+            -- The example that makes the case for the whole module: as a
+            -- Float, 2.675 is really 2.67499999999999982..., so rounding it
+            -- gives 2.67 and everyone blames the rounding.
+            , U.test "2.675 rounds up, because here it really is 2.675" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "2.68", Just "2.67" ]
+                        [ Maybe.map (text << BigDecimal.roundTo 2 HalfUp) (dec "2.675")
+                        , Maybe.map (text << BigDecimal.roundTo 2 HalfUp) (BigDecimal.fromFloat 2.675)
+                        ]
+                    )
+            , U.test "rounding to more places than there are does nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1.5", Just "1.5", Just "0" ]
+                        [ Maybe.map (text << BigDecimal.roundTo 9 HalfEven) (dec "1.5")
+                        , Maybe.map (text << BigDecimal.roundTo 1 HalfEven) (dec "1.50")
+                        , Just (text (BigDecimal.roundTo 4 HalfUp BigDecimal.zero))
+                        ]
+                    )
+            , U.test "negative places round to tens and hundreds" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "12000", Just "13000", Just "0" ]
+                        [ Maybe.map (text << BigDecimal.roundTo -3 HalfUp) (dec "12345")
+                        , Maybe.map (text << BigDecimal.roundTo -3 HalfUp) (dec "12500")
+                        , Maybe.map (text << BigDecimal.roundTo -3 HalfUp) (dec "499")
+                        ]
+                    )
+            -- READING
+            , U.test "the shapes a person writes" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "1.5", Just "-0.001", Just "1500", Just "0.0015", Just "42", Just "0.5" ]
+                        [ decimalOf "1.5"
+                        , decimalOf "-0.001"
+                        , decimalOf "1.5e3"
+                        , decimalOf "1.5E-3"
+                        , decimalOf "+42"
+                        , decimalOf ".5"
+                        ]
+                    )
+            , U.test "underscores are ignored wherever they fall" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1000.0001", Just "1000000" ]
+                        [ decimalOf "1_000.000_1"
+                        , decimalOf "1_000_000"
+                        ]
+                    )
+            , U.test "and nonsense is Nothing, not zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing, Nothing ]
+                        [ decimalOf "1.2.3"
+                        , decimalOf "3 apples"
+                        , decimalOf ""
+                        , decimalOf "."
+                        , decimalOf "-"
+                        , decimalOf "1e"
+                        , decimalOf "1e2e3"
+                        , decimalOf "0x10"
+                        ]
+                    )
+            , U.test "a big value goes in and comes back out whole" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "123456789012345678901234567890.0987654321")
+                        (decimalOf "123456789012345678901234567890.0987654321")
+                    )
+            -- WRITING
+            , U.test "toString writes it out in full, with no exponent" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0.000000001", Just "1500", Just "-0.5", Just "0" ]
+                        [ decimalOf "1e-9"
+                        , decimalOf "1.5e3"
+                        , decimalOf "-0.5"
+                        , decimalOf "0.0"
+                        ]
+                    )
+            , U.test "toStringWithPlaces is where the padding lives" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "1.50", Just "0.00", Just "-0.50", Just "2", Just "1.00" ]
+                        [ Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "1.5")
+                        , Just (BigDecimal.toStringWithPlaces 2 BigDecimal.zero)
+                        , Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "-0.5")
+                        , Maybe.map (BigDecimal.toStringWithPlaces 0) (dec "1.5")
+                        , Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "1")
+                        ]
+                    )
+            , U.test "and it rounds half-even when there are too many" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "2.68", Just "2.66" ]
+                        [ Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "2.675001")
+                        , Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "2.665")
+                        ]
+                    )
+            -- Python writes this one "-0.00", because its zero carries a sign.
+            -- Ours does not: normalisation leaves one zero and it is positive,
+            -- which is the price of `==` meaning numeric equality.
+            , U.test "a value that rounds away to nothing loses its sign with it" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "0.00", Just "0" ]
+                        [ Maybe.map (BigDecimal.toStringWithPlaces 2) (dec "-0.001")
+                        , Maybe.map (text << BigDecimal.roundTo 2 HalfEven) (dec "-0.001")
+                        ]
+                    )
+            -- THE OTHER NUMERIC TYPES
+            , U.test "fromFloat gives the double, not the number that was typed" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "0.1000000000000000055511151231257827021181583404541015625"
+                        , Just "1000000000000000019884624838656"
+                        , Just "0"
+                        , Just "-0.5"
+                        ]
+                        [ Maybe.map text (BigDecimal.fromFloat 0.1)
+                        , Maybe.map text (BigDecimal.fromFloat 1.0e30)
+                        , Maybe.map text (BigDecimal.fromFloat 0)
+                        , Maybe.map text (BigDecimal.fromFloat -0.5)
+                        ]
+                    )
+            , U.test "and refuses what is not a number at all" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Nothing ]
+                        [ Maybe.map text (BigDecimal.fromFloat (0 / 0))
+                        , Maybe.map text (BigDecimal.fromFloat (1 / 0))
+                        ]
+                    )
+            , U.test "toFloat is the lossy direction, and rounds to the nearest" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just 0.1, Just 1.5, Just 0, Just -0.001 ]
+                        [ Maybe.map BigDecimal.toFloat (dec "0.1")
+                        , Maybe.map BigDecimal.toFloat (dec "1.5")
+                        , Maybe.map BigDecimal.toFloat (dec "0")
+                        , Maybe.map BigDecimal.toFloat (dec "-0.001")
+                        ]
+                    )
+            , U.test "toBigInt truncates toward zero" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "-3", Just "3", Just "0", Just "100" ]
+                        [ Maybe.map (BigInt.toString << BigDecimal.toBigInt) (dec "-3.7")
+                        , Maybe.map (BigInt.toString << BigDecimal.toBigInt) (dec "3.7")
+                        , Maybe.map (BigInt.toString << BigDecimal.toBigInt) (dec "-0.9")
+                        , Maybe.map (BigInt.toString << BigDecimal.toBigInt) (dec "100")
+                        ]
+                    )
+            , U.test "toInt refuses a fraction rather than rounding it away" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Nothing, Just 2, Just 2, Nothing ]
+                        [ Maybe.andThen BigDecimal.toInt (dec "2.5")
+                        , Maybe.andThen BigDecimal.toInt (dec "2.00")
+                        , Maybe.andThen BigDecimal.toInt (dec "2e0")
+                        , Maybe.andThen BigDecimal.toInt (dec "1e30")
+                        ]
+                    )
+            , U.test "isInteger asks the same question of the value, not the text" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just True, Just True, Just False, Just True ]
+                        [ Maybe.map BigDecimal.isInteger (dec "2.00")
+                        , Maybe.map BigDecimal.isInteger (dec "100")
+                        , Maybe.map BigDecimal.isInteger (dec "0.001")
+                        , Just (BigDecimal.isInteger BigDecimal.zero)
+                        ]
+                    )
+            , U.test "a BigInt goes in and comes back unchanged" <| \_ ->
+                Task.succeed
+                    (Expect.equal (Just "18446744073709551617")
+                        (BigInt.fromString "18446744073709551617"
+                            |> Maybe.map (text << BigDecimal.fromBigInt)
+                        )
+                    )
+            -- COMPARING AND MOVING
+            , U.test "max and min stand in for the Basics pair" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "1.51", Just "1.5", Just "-1.5" ]
+                        [ Maybe.map2 BigDecimal.max (dec "1.5") (dec "1.51") |> Maybe.map text
+                        , Maybe.map2 BigDecimal.min (dec "1.5") (dec "1.51") |> Maybe.map text
+                        , Maybe.map2 BigDecimal.min (dec "-1.5") (dec "1.5") |> Maybe.map text
+                        ]
+                    )
+            -- THE EXTREMES
+            --
+            -- Written as properties rather than as literals, because the
+            -- literals are a thousand digits long. Each is a place where a
+            -- loop in the implementation runs a few thousand times: the
+            -- doubling in `fromFloat`, the trailing-zero stripping in the
+            -- constructor, the long division in `divByTo`.
+            , U.test "the smallest double there is converts exactly" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        -- 5e-324 is 2^-1074, so it needs 1074 decimal places
+                        -- and not one fewer.
+                        [ Just True, Just True, Just True ]
+                        [ Maybe.map (\d -> BigDecimal.scale d == 1074) (BigDecimal.fromFloat 5.0e-324)
+                        , Maybe.map (\d -> BigDecimal.toFloat d == 5.0e-324) (BigDecimal.fromFloat 5.0e-324)
+                        , Maybe.map (\d -> d == BigDecimal.powBy -1074 (BigDecimal.fromInt 2)) (BigDecimal.fromFloat 5.0e-324)
+                        ]
+                    )
+            , U.test "ten thousand trailing zeroes come off, and go back on" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ -10000, 10001 ]
+                        [ BigDecimal.scale (BigDecimal.powBy 10000 (BigDecimal.fromInt 10))
+                        , String.count (text (BigDecimal.powBy 10000 (BigDecimal.fromInt 10)))
+                        ]
+                    )
+            , U.test "a third to sixty places is sixty threes" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        (Just ("0." ++ String.repeat 60 "3"))
+                        (divTo 60 HalfEven "1" "3")
+                    )
+            , U.test "past a double's range toFloat gives an infinity, not a Nothing" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just True, Just True ]
+                        [ Maybe.map (Basics.isInfinite << BigDecimal.toFloat) (dec "1e400")
+                        , Maybe.map (\d -> BigDecimal.toFloat d == 0) (dec "1e-400")
+                        ]
+                    )
+            , U.test "an exponent may carry its own plus sign" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "100000", Just "100000" ]
+                        [ decimalOf "1e+5"
+                        , decimalOf "1E5"
+                        ]
+                    )
+            , U.test "movePointBy multiplies by a power of ten" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "150", Just "0.015", Just "1.5", Just "0" ]
+                        [ Maybe.map (text << BigDecimal.movePointBy 2) (dec "1.5")
+                        , Maybe.map (text << BigDecimal.movePointBy -2) (dec "1.5")
+                        , Maybe.map (text << BigDecimal.movePointBy 0) (dec "1.5")
+                        , Just (text (BigDecimal.movePointBy 5 BigDecimal.zero))
+                        ]
+                    )
+            ]
+        }
+
+
+-- HELPERS
+
+
+dec : String -> Maybe BigDecimal
+dec =
+    BigDecimal.fromString
+
+
+text : BigDecimal -> String
+text =
+    BigDecimal.toString
+
+
+decimalOf : String -> Maybe String
+decimalOf source =
+    Maybe.map text (dec source)
+
+
+isZeroOf : Maybe String -> Bool
+isZeroOf answer =
+    answer == Just "0"
+
+
+cmp : String -> String -> Maybe Order
+cmp a b =
+    Maybe.map2 BigDecimal.compare (dec a) (dec b)
+
+
+add : String -> String -> Maybe String
+add a b =
+    Maybe.map2 BigDecimal.add (dec a) (dec b) |> Maybe.map text
+
+
+sub : String -> String -> Maybe String
+sub a b =
+    Maybe.map2 (\x y -> x |> BigDecimal.subBy y) (dec a) (dec b) |> Maybe.map text
+
+
+mul : String -> String -> Maybe String
+mul a b =
+    Maybe.map2 BigDecimal.mul (dec a) (dec b) |> Maybe.map text
+
+
+div : String -> String -> Maybe String
+div a b =
+    Maybe.map2 (\x y -> x |> BigDecimal.divBy y) (dec a) (dec b)
+        |> Maybe.andThen identity
+        |> Maybe.map text
+
+
+divTo : Int -> Rounding -> String -> String -> Maybe String
+divTo places rounding a b =
+    Maybe.map2 (\x y -> x |> BigDecimal.divByTo places rounding y) (dec a) (dec b)
+        |> Maybe.andThen identity
+        |> Maybe.map text
+
+
+{-| The seven values the roundings disagree about, rounded to a whole number.
+Two ties, four near-misses either side, and both signs of each.
+-}
+roundRow : Rounding -> Array String
+roundRow rounding =
+    Array.map
+        (\source ->
+            dec source
+                |> Maybe.map (text << BigDecimal.roundTo 0 rounding)
+                |> Maybe.withDefault "?"
+        )
+        [ "2.5", "3.5", "-2.5", "2.4", "2.6", "-2.6", "-2.4" ]
+
+
+repeatAdd : Int -> BigDecimal -> BigDecimal -> BigDecimal
+repeatAdd count value acc =
+    if count <= 0 then
+        acc
+
+    else
+        repeatAdd (count - 1) value (BigDecimal.add acc value)
