@@ -23,7 +23,7 @@ Everything runs inside devbox; `gren` and node 22 are not on `PATH` otherwise.
 ```sh
 devbox run build    # compile the package
 devbox run docs     # check the doc comments parse
-devbox run test     # tests/run.sh: 126 checks, ~1s
+devbox run test     # tests/run.sh: 132 checks, ~1s
 ```
 
 Format sources after editing them, especially after scripted edits. The
@@ -71,6 +71,16 @@ only `//`.
    a field one limb wider than either, applies the operation limb by limb,
    and converts back. `complement` needs none of that: `~x` is `-x - 1`.
 
+Then reading and writing at the bottom. `toStringWithBase` has two routes and
+the split is the point of the 24-bit limb: bases 2, 4, 8 and 16 have a bit
+width that divides 24, so `sliceLimbs` writes each limb as a fixed run of
+digits and concatenates — linear, no arithmetic. Every other base, **base 32
+included** (a digit is five bits and 24 is not divisible by five), divides the
+number down by the largest power of the base that fits in a limb, which is
+quadratic. If you touch `sliceLimbs`, the thing to preserve is that the top
+limb is unpadded and every limb below it is padded to the full width; the
+mutation that drops the padding prints `2^48 + 1` as `11`, and the tests for
+that are in `Strings.gren`.
 
 ### src/BigDecimal.gren
 

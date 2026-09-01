@@ -127,6 +127,85 @@ stringsSuite =
                             (BigInt.add (BigInt.fromInt 2 |> BigInt.powBy 100) BigInt.one)
                         )
                     )
+            -- Bases 2, 4, 8 and 16 skip the division entirely: 24 bits is a
+            -- whole number of their digits, so each limb is written out at a
+            -- fixed width and the runs are concatenated. What that route can
+            -- get wrong is padding -- an interior limb of zero contributes a
+            -- full run of zero digits, and dropping them would print 2^48 + 1
+            -- as "11". Both values below have a zero limb in the middle, and
+            -- 2^72 + 1 has two.
+            , U.test "a limb of zero in the middle keeps its full run of digits" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ "1000000000001"
+                        , "10000000000000001"
+                        , "1000000000000000000000001"
+                        , "1000000000000000000000000000000000000000000000001"
+                        ]
+                        [ BigInt.toStringWithBase 16 (twoTo 48 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 8 (twoTo 48 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 4 (twoTo 48 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 2 (twoTo 48 |> BigInt.add BigInt.one)
+                        ]
+                    )
+            , U.test "and two of them in a row do too" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ "1000000000000000001"
+                        , "1000000000000000000000001"
+                        , "1000000000000000000000000000000000001"
+                        ]
+                        [ BigInt.toStringWithBase 16 (twoTo 72 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 8 (twoTo 72 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 4 (twoTo 72 |> BigInt.add BigInt.one)
+                        ]
+                    )
+            -- The top limb is the one that is *not* padded, or every number
+            -- would come out with leading zeroes. 2^24 is the boundary case:
+            -- a top limb of 1 above a limb of nothing.
+            , U.test "but the top limb is written at its own width" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ "1000000", "100000000", "1000000000000", "ffffff", "77777777" ]
+                        [ BigInt.toStringWithBase 16 (twoTo 24)
+                        , BigInt.toStringWithBase 8 (twoTo 24)
+                        , BigInt.toStringWithBase 4 (twoTo 24)
+                        , BigInt.toStringWithBase 16 (twoTo 24 |> BigInt.subBy BigInt.one)
+                        , BigInt.toStringWithBase 8 (twoTo 24 |> BigInt.subBy BigInt.one)
+                        ]
+                    )
+            , U.test "a three-limb value in all four sliced bases" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ "deadbeefcafebabe"
+                        , "1572555756771277535276"
+                        , "31322231233232333022333223222332"
+                        , "1101111010101101101111101110111111001010111111101011101010111110"
+                        ]
+                        [ BigInt.toStringWithBase 16 (big "16045690984503098046")
+                        , BigInt.toStringWithBase 8 (big "16045690984503098046")
+                        , BigInt.toStringWithBase 4 (big "16045690984503098046")
+                        , BigInt.toStringWithBase 2 (big "16045690984503098046")
+                        ]
+                    )
+            -- 32 is a power of two and still divides, because 24 is not a
+            -- whole number of five-bit digits. It has to keep agreeing with
+            -- the sliced bases about the same numbers.
+            , U.test "base 32 is not one of them, and still gets it right" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "8000000001", "400000000000001", "dtbdutv5ftelu" ]
+                        [ BigInt.toStringWithBase 32 (twoTo 48 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 32 (twoTo 72 |> BigInt.add BigInt.one)
+                        , BigInt.toStringWithBase 32 (big "16045690984503098046")
+                        ]
+                    )
+            , U.test "and the sign still goes in front of it" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ "-1000000000001", "-deadbeefcafebabe" ]
+                        [ BigInt.toStringWithBase 16 (BigInt.negate (twoTo 48 |> BigInt.add BigInt.one))
+                        , BigInt.toStringWithBase 16 (big "-16045690984503098046")
+                        ]
+                    )
             , U.test "every base round trips, for a number of every size" <| \_ ->
                 Task.succeed (Expect.equal [] (Array.takeFirst 8 roundTripFailures))
             ]
@@ -189,6 +268,11 @@ roundTripFailures =
                                     )
                         )
             )
+
+
+twoTo : Int -> BigInt
+twoTo exponent =
+    BigInt.fromInt 2 |> BigInt.powBy exponent
 
 
 decimalOf : String -> Maybe String

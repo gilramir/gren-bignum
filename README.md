@@ -242,15 +242,107 @@ the two disagreeing is the whole reason to have a decimal type.
 ## How it works
 
 Sign and magnitude: a `Bool` and an array of 24-bit limbs, least significant
-first. Twenty-four bits because every power-of-two base anyone formats in
-divides it evenly — six hex digits to a limb, eight octal, twenty-four binary —
-so those conversions are slicing rather than arithmetic. And because a limb
-times a limb plus a carry stays under 2^48, which a double still holds exactly.
+first. A 64-bit value is three of them, and they do not line up with the 64
+bits — the value has no width, which is the point.
+
+```
+0xDEADBEEFCAFEBABE  =  16045690984503098046
+
+     limb 2     limb 1     limb 0
+    0x00DEAD   0xBEEFCA   0xFEBABE
+      57005    12513738   16693950
+
+stored as [ 0xFEBABE, 0xBEEFCA, 0x00DEAD ]   -- least significant first
+```
+
+Little-endian because that is the order the arithmetic wants: limb 0 is where
+addition starts and where a carry comes from, so growing a number is
+`pushLast` and never a shift of everything already there.
+
+### Why twenty-four
+
+Two reasons, and they pull in opposite directions.
+
+The first is that a limb times a limb plus a carry has to stay inside what a
+double holds exactly. 24 + 24 = 48, comfortably under 53, so every partial
+product in the multiplication is exact. This is the reason a limb is *small*;
+bn.js gets the same guarantee out of 26 bits and CPython out of 30.
+
+The second is what those two extra bits buy. Twenty-four is divisible by 1, 2,
+3 and 4, which is to say:
+
+```
+2^24  =  16^6  =  8^8  =  4^12
+```
+
+One limb is exactly six hex digits, exactly eight octal digits, exactly
+twenty-four binary ones. So in any of those bases the answer *is* the limbs,
+written out most significant first and padded to width — and that is what
+`toStringWithBase` does for them:
+
+```
+    00dead  beefca  febabe        -- each limb as six hex digits
+->  deadbeefcafebabe              -- leading zeroes off the top limb
+
+    00157255 57567712 77535276    -- each limb as eight octal digits
+->  1572555756771277535276
+```
+
+No carries and no division, and nothing that depends on how big the number is:
+a digit of a limb is already a digit of the answer, sitting in the right
+place. The only subtlety is that the top limb is written at its natural width
+and every limb under it is padded to the full six — an interior zero limb is
+six zero digits of the number, and dropping them would print `2^48 + 1` as
+`11`.
+
+Decimal has no such luck. 10^7 < 2^24 < 10^8, so a limb is somewhere between
+seven and eight decimal digits and never a whole number of them; the carries
+cross limb boundaries, and the number really does have to be divided down.
+
+For a package whose reason to exist is looking at a value in hex, that is the
+right way to spend two bits.
+
+### What the other thirty-two bases have to do
+
+`toStringWithBase` takes the slicing route for 2, 4, 8 and 16, and only those.
+Everything else has to divide: find the largest power of the base that fits in
+a limb, divide the number down by it repeatedly, and pad each remainder.
+
+| base | route | digits at a time |
+|---|---|---|
+| 2 | sliced | 24 |
+| 4 | sliced | 12 |
+| 8 | sliced | 8 |
+| 16 | sliced | 6 |
+| 10 | divided by 10^7 | 7 |
+| 32 | divided by 32^4 | 4 |
+| 36 | divided by 36^4 | 4 |
+
+Base 32 is the one that looks like it should qualify and does not: it is a
+power of two, but a digit is five bits and 24 is not divisible by five, so its
+digits straddle limb boundaries like any other base's.
+
+The difference is not small, because dividing the number down is quadratic —
+each chunk walks every limb — and slicing is linear. Formatting an 8192-bit
+number in hex three hundred times:
+
+```
+divided:  477 ms
+sliced:    38 ms
+```
+
+Both give the same string. The round-trip test writes and re-reads every one
+of the eleven sample values in all thirty-five bases, so the two routes are
+held to the same answers.
+
+### The arithmetic
 
 Multiplication is long multiplication a row at a time. Division is Knuth's
 Algorithm D, written as a fold rather than as mutation of a scratch buffer,
 with both operands normalised first so the trial quotient is never more than
 two too high.
+
+### And the decimals on top
 
 `BigDecimal` adds nothing to that. It is a `BigInt` and an `Int` scale, and
 every operation is a scale adjustment and then the integer operation: `add`

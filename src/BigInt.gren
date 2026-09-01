@@ -146,9 +146,11 @@ this -- CPython uses 30-bit digits, bn.js uses 26 -- and the reason is
 multiplication: a limb times a limb plus a carry has to stay under 2^53. What
 is particular here is the 24, which spends two of bn.js's bits on a different
 property: 24 is divisible by 1, 2, 3 and 4, so binary, octal and hexadecimal
-all land on limb boundaries and formatting in them is slicing rather than
-arithmetic. See the README for who this belongs to; the algorithms are
-Knuth's.
+all land on limb boundaries. One limb is exactly six hex digits, eight octal,
+twenty-four binary, so [`toStringWithBase`](#toStringWithBase) writes those
+bases by slicing the limbs apart rather than dividing the number down -- see
+`sliceLimbs`. Every other base, base 32 included, has to divide. See the README
+for who all of this belongs to; the algorithms are Knuth's.
 
 Two's complement does appear, in [`and`](#and) and its neighbours, which read a
 value *as if* it were two's complement of unbounded width. That is the only
@@ -1380,20 +1382,85 @@ toStringWithBase base value =
 
     else
         let
-            -- The largest power of the base that still fits in one limb, so
-            -- the number is consumed a chunk at a time rather than a digit at
-            -- a time.
-            chunk =
-                largestPower base 1 0
-
             body =
-                chunks chunk.value chunk.digits base (unwrap (abs value)) []
+                when digitsPerLimb base is
+                    Just width ->
+                        sliceLimbs base width (unwrap (abs value))
+
+                    Nothing ->
+                        let
+                            -- The largest power of the base that still fits in
+                            -- one limb, so the number is consumed a chunk at a
+                            -- time rather than a digit at a time.
+                            chunk =
+                                largestPower base 1 0
+                        in
+                        chunks chunk.value chunk.digits base (unwrap (abs value)) []
         in
         if isNegative value then
             "-" ++ body
 
         else
             body
+
+
+{-| How many digits of this base one limb is worth, when it is a whole number
+of them.
+
+Only the bases whose bit width divides 24: two, four, eight and sixteen. That
+divisibility is the property the limb size was chosen for, and this is the
+function that spends it. Base 32 is a power of two and still misses, because
+24 is not divisible by five.
+
+-}
+digitsPerLimb : Int -> Maybe Int
+digitsPerLimb base =
+    when base is
+        2 ->
+            Just limbBits
+
+        4 ->
+            Just (limbBits // 2)
+
+        8 ->
+            Just (limbBits // 3)
+
+        16 ->
+            Just (limbBits // 4)
+
+        _ ->
+            Nothing
+
+
+{-| Write a magnitude in a base whose digits divide a limb evenly: each limb
+becomes a fixed run of digits, and the answer is those runs concatenated with
+the most significant limb first. No division, no carries, and nothing that
+depends on the size of the number -- the digits of a limb are already digits of
+the answer, sitting in the right place.
+
+The top limb is written at whatever width it needs, so the result has no
+leading zeroes. Every limb below it is padded to the full width, because a zero
+*inside* a number is a digit of it. That padding is the whole of the
+correctness here: without it `2^48 + 1` would print as `11`.
+
+-}
+sliceLimbs : Int -> Int -> Array Int -> String
+sliceLimbs base width limbs =
+    when Array.popLast limbs is
+        Just popped ->
+            String.join ""
+                (Array.pushFirst (limbToString base popped.last)
+                    (Array.reverse
+                        (Array.map
+                            (\limb -> String.padLeft width '0' (limbToString base limb))
+                            popped.initial
+                        )
+                    )
+                )
+
+        Nothing ->
+            -- Unreachable: zero is answered before this is reached.
+            "0"
 
 
 largestPower : Int -> Int -> Int -> { value : Int, digits : Int }
