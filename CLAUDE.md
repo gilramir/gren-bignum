@@ -21,7 +21,17 @@ devbox run docs     # check the doc comments parse
 devbox run test     # tests/run.sh: 76 checks, ~1s
 ```
 
-Format sources after editing them, especially after scripted edits.
+Format sources after editing them, especially after scripted edits. The
+formatter is a separate tool and is not part of the devbox environment — there
+is no `gren format` subcommand in 0.6.6:
+
+```sh
+~/prj/gren-format/gren-format/gren-format.sh src/ tests/src/   # in place
+~/prj/gren-format/gren-format/gren-format.sh --diff src/       # what would change
+```
+
+It is idempotent on the sources as committed, so any diff it reports is
+something new that has drifted from the house style.
 
 ## The platform fact that governs the implementation
 
