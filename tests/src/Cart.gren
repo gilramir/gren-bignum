@@ -56,7 +56,7 @@ subtotal =
     BigDecimal.sum extended
 
 
-{-| Fifteen per cent off the order. The rounding happens once, here, before
+{-| Fifteen percent off the order. The rounding happens once, here, before
 anything is shared out: `10.035` is not a discount anybody can be given, and
 the decision to make it `10.04` belongs to the shop rather than to a formatter
 further down.
@@ -135,7 +135,7 @@ cartSuite =
                         { lines = [ "59.97", "4.95", "1.98" ], subtotal = "66.9" }
                         { lines = Array.map text extended, subtotal = text subtotal }
                     )
-            , U.test "fifteen per cent off is rounded once, before it is shared out" <| \_ ->
+            , U.test "fifteen percent off is rounded once, before it is shared out" <| \_ ->
                 Task.succeed
                     (Expect.equal { exact = "10.035", charged = "10.04" }
                         { exact = text (BigDecimal.mul subtotal (dec "0.15"))

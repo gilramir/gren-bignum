@@ -57,14 +57,14 @@ only `//`.
 ### src/BigInt.gren, in four layers, in this order down the file
 
 1. **The type and conversions.** Sign and magnitude: a `Bool` and an array of
-   24-bit limbs, little-endian, normalised so there are no leading zero limbs
+   24-bit limbs, little-endian, normalized so there are no leading zero limbs
    and zero is the empty array. Everything is built through `make`, which
    enforces that — which is what keeps `==` meaningful.
 2. **Magnitudes** (`magAdd`, `magSub`, `mulByLimb`, `magMul`, `magDivMod`,
    the shifts). Bare limb arrays, no signs. `magMul` accumulates rows with
    `magAdd` rather than writing into a scratch buffer, which keeps it to
    sequential building on immutable arrays. `magDivMod` is Knuth's algorithm D
-   with normalisation, so `correct` runs at most twice.
+   with normalization, so `correct` runs at most twice.
 3. **Signed wrappers** — the arithmetic, comparison and the two divisions.
 4. **Bits and widths.** `bitwise` converts both operands to two's complement in
    a field one limb wider than either, applies the operation limb by limb,

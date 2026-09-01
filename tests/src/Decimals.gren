@@ -539,7 +539,7 @@ decimalsSuite =
                         ]
                     )
             -- Python writes this one "-0.00", because its zero carries a sign.
-            -- Ours does not: normalisation leaves one zero and it is positive,
+            -- Ours does not: normalization leaves one zero and it is positive,
             -- which is the price of `==` meaning numeric equality.
             , U.test "a value that rounds away to nothing loses its sign with it" <| \_ ->
                 Task.succeed
@@ -713,7 +713,7 @@ decimalsSuite =
             -- A comma is a thousand in one country and a decimal point in
             -- another, and the text cannot say which. The doc comment gives
             -- the recipe for a caller who knows; here it is, run once.
-            , U.test "a comma is refused in either role, and normalised by the caller" <| \_ ->
+            , U.test "a comma is refused in either role, and normalized by the caller" <| \_ ->
                 Task.succeed
                     (Expect.equal [ Nothing, Nothing, Nothing, Just "1234.56" ]
                         [ decimalOf "1,234.56"
@@ -1023,7 +1023,7 @@ isTooLong result =
             False
 
 
-{-| The localisation recipe from the `fromString` doc comment: drop the
+{-| The localization recipe from the `fromString` doc comment: drop the
 grouping points, turn the decimal comma into a point.
 -}
 german : String -> String

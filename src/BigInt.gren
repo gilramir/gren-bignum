@@ -162,7 +162,7 @@ limbs apart rather than by dividing the number down (see `sliceLimbs`). Every
 other base, base 32 included, has to divide. The README says where all of this
 comes from; the algorithms are Knuth's.
 
-Two's complement does appear, in [`and`](#and) and its neighbours, which read
+Two's complement does appear, in [`and`](#and) and its neighbors, which read
 a value *as if* it were two's complement of unbounded width. That is the only
 reading under which `complement 5` can be `-6` when nobody has said how wide
 the number is.
@@ -195,7 +195,7 @@ limbBaseFloat =
 
 {-| Zero.
 
-This is the value the whole representation is normalised around: a magnitude
+This is the value the whole representation is normalized around: a magnitude
 that cancels becomes the empty limb array, and an empty limb array is never
 negative. So there is exactly one zero, and `x |> subBy x == BigInt.zero` is
 a reliable test.
@@ -220,7 +220,7 @@ one =
     BigInt { negative = False, limbs = [ 1 ] }
 
 
-{-| Build a value from a sign and a magnitude, normalising both: leading zero
+{-| Build a value from a sign and a magnitude, normalizing both: leading zero
 limbs go, and a zero magnitude is never negative. Every value in this module is
 made here, which is what makes `==` mean numeric equality.
 -}
@@ -337,7 +337,7 @@ toFloat (BigInt value) =
 -- MAGNITUDES
 --
 -- Everything from here to the next banner works on bare limb arrays:
--- little-endian, base 2^24, normalised. None of it knows about signs.
+-- little-endian, base 2^24, normalized. None of it knows about signs.
 --
 -- One platform fact governs all of it. **Gren's `//` truncates its result to
 -- 32 bits**: `(2^48) // 2` is 0, and `(2^31) // 1` is -2147483648. It is
@@ -628,7 +628,7 @@ mutation of a scratch buffer.
 Both operands are shifted left until the divisor's top limb fills at least
 half of one. That is what bounds the error in the trial quotient to two, so
 the correction loop runs at most twice however unlucky the numbers are.
-Without the normalisation the estimate can be arbitrarily bad, and the loop
+Without the normalization the estimate can be arbitrarily bad, and the loop
 that fixes it would become the whole algorithm.
 
 -}
@@ -700,7 +700,7 @@ longDivide dividend divisor =
     go (Array.length dividend - 1) [] (Builder.empty (Array.length dividend))
 
 
-{-| Walk the trial quotient down until it fits. Normalisation caps this at two
+{-| Walk the trial quotient down until it fits. Normalization caps this at two
 turns. It is a loop rather than two subtractions because if that bound were
 ever wrong, two subtractions would fail silently.
 -}
@@ -958,7 +958,7 @@ compare (BigInt a) (BigInt b) =
 {-| Whether this is zero, which is `Array.isEmpty` on the limbs and so costs
 nothing at any size.
 
-`x == BigInt.zero` gives the same answer, because normalisation guarantees a
+`x == BigInt.zero` gives the same answer, because normalization guarantees a
 single representation. This one just reads better.
 
 -}

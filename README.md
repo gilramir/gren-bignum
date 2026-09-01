@@ -378,7 +378,7 @@ roundTo 0 Floor   (-2.5)   --> -3     -- toward -infinity
 ```
 
 The semantics and the names come from different places, deliberately. The
-seven behaviours are Python's `decimal` module's, because that is what the
+seven behaviors are Python's `decimal` module's, because that is what the
 tests check against. The names are `java.math.RoundingMode`'s, because
 Python spells the same seven `ROUND_HALF_EVEN` and the prefix is noise inside
 a type already called `Rounding`, while Java's bare words are already
@@ -607,7 +607,7 @@ the case where it would be.
 
 Multiplication is long multiplication, one row at a time. Division is Knuth's
 Algorithm D, written as a fold rather than as mutation of a scratch buffer,
-with both operands normalised first so the trial quotient is never more than
+with both operands normalized first so the trial quotient is never more than
 two too high.
 
 ### The decimals on top
@@ -665,7 +665,7 @@ overflow. Knuth gives the classical algorithms for an arbitrary radix *b* in
 *The Art of Computer Programming*, Vol. 2, §4.3.1: Algorithm A (addition), S
 (subtraction), M (multiplication) and D (division). Every operation in this
 package is one of those four. The division is Algorithm D as given there,
-including the normalisation step and the result that a trial quotient formed
+including the normalization step and the result that a trial quotient formed
 from the leading digits is never more than two too large. The `correct` loop
 in the source exists because of that bound, and would be unbounded without
 it.
@@ -689,7 +689,7 @@ one.
 
 **The decimal representation is not ours either.** An unscaled integer and a
 decimal exponent is what `java.math.BigDecimal` is, what Python's `decimal`
-module is, and what IEEE 754-2008 standardised as a decimal format. Five of
+module is, and what IEEE 754-2008 standardized as a decimal format. Five of
 the seven roundings are that standard's rounding-direction attributes wearing
 Java's names: `HalfEven` is `roundTiesToEven`, `HalfUp` is `roundTiesToAway`,
 and `Ceiling`, `Floor` and `Down` are the three `roundToward` attributes. The

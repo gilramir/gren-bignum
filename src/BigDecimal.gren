@@ -202,7 +202,7 @@ one =
     BigDecimal { unscaled = BigInt.one, scale = 0 }
 
 
-{-| Build a value from an unscaled `BigInt` and a scale, normalising it:
+{-| Build a value from an unscaled `BigInt` and a scale, normalizing it:
 trailing zeroes are stripped from the unscaled value and the scale is reduced
 to match, and a zero unscaled value is given a scale of zero.
 
@@ -491,7 +491,7 @@ add (BigDecimal a) (BigDecimal b) =
         |> BigDecimal.toString
     --> "24.85"
 
-A column of prices is the commonest thing anyone does with these, and the
+A column of prices is the most common thing anyone does with these, and the
 reason it is worth a function of its own is that nothing here rounds: the
 answer does not depend on the order the values arrive in, which is exactly
 what a `Float` cannot promise.
@@ -966,7 +966,7 @@ The last three all go to the nearer value and differ only on an exact tie:
   - `HalfUp`: ties away from zero. `2.5` becomes `3`. This is the rounding
     taught in school, and the one most people mean.
   - `HalfDown`: ties toward zero. `2.5` becomes `2`.
-  - `HalfEven`: ties to the even neighbour. `2.5` becomes `2` and `3.5`
+  - `HalfEven`: ties to the even neighbor. `2.5` becomes `2` and `3.5`
     becomes `4`. Ties fall both ways instead of always up, so a long column of
     rounded numbers does not drift. This is banker's rounding, and it is what
     IEEE 754 does by default.
@@ -1133,7 +1133,7 @@ signOf value =
         1
 
 
-{-| Whether this is zero, which costs nothing at any size: normalisation leaves
+{-| Whether this is zero, which costs nothing at any size: normalization leaves
 exactly one zero, so this is a look at the unscaled value and nothing else.
 -}
 isZero : BigDecimal -> Bool
@@ -1151,7 +1151,7 @@ isNegative (BigDecimal value) =
 {-| Whether there is nothing after the point.
 
 The test is simply whether the scale is zero or less, and that only works
-because of normalisation: a value that ends in a zero has already had it
+because of normalization: a value that ends in a zero has already had it
 removed, so `1.50` arrives here as `1.5` and `2.00` as `2`.
 
     BigDecimal.fromString "2.00" |> Maybe.map BigDecimal.isInteger
@@ -1220,8 +1220,8 @@ point, an `e` with nothing after it, a trailing unit:
 The point is always `.` and there is no grouping separator but `_`, as in a
 Gren literal. A comma is not a digit, so `1,234.56` and `1.234,56` are both
 `Nothing`. That is deliberate: `1,234` is a thousand in one country and a bit
-over one in another, and no parser can tell from the text alone. Normalise a
-localised string before it gets here, where the locale is known:
+over one in another, and no parser can tell from the text alone. Normalize a
+localized string before it gets here, where the locale is known:
 
     german text =
         text
@@ -1597,7 +1597,7 @@ toStringWithPlacesUsing places rounding value =
 
     else
         let
-            -- Back up to exactly `places`, which normalisation has just taken
+            -- Back up to exactly `places`, which normalization has just taken
             -- away again. This is the one place the module writes a zero it
             -- does not store.
             digits =
