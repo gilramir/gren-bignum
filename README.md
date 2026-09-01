@@ -16,13 +16,14 @@ BigDecimal.fromString "0.1"
     --> Just "0.3"
 ```
 
-**TL;DR.** A Gren `Int` is a double, so it is exact up to 2^53 and wrong
-above that, and Gren's `//` operator is wrong far sooner than that. `BigInt`
-is an integer with no upper limit, plus the `uint64`- and `int32`-shaped views
-you need when you are checking what a real machine did. `BigDecimal` is a
-`BigInt` with a decimal point: it adds and multiplies without rounding, and
-rounds only when you tell it to and say how. The implementation is the
-classical algorithms on 24-bit limbs, and section 6 explains why 24.
+**TL;DR.** A Gren `Int` is a stored in a JavaScript double floating-point,
+so it is exactup to 2^53 and wrong above that, and Gren's `//`
+operator is wrong far sooner than that. `BigInt` is an integer with no
+upper limit, plus the `uint64`- and `int32`-shaped views if you need
+them. `BigDecimal` is a `BigInt` with a decimal point: it adds and
+multiplies without rounding, and rounds only when you tell it to and
+say how. The implementation is the classical algorithms on 24-bit limbs,
+and section 6 explains why 24.
 
 ## Table of contents
 
@@ -87,6 +88,39 @@ floors and its modulus takes the sign of the divisor; that is Python. So
 `-7 / 2` is `-3` remainder `-1` in the first and `-4` modulus `1` in the
 second. Neither is more correct than the other.
 
+Side by side, starting where the two agree and then putting a negative on
+each side of the slash:
+
+```gren
+-- 7 / 2: both positive, and the two divisions agree
+
+BigInt.fromInt 7 |> BigInt.quotRemBy (BigInt.fromInt 2)
+--> Just { quotient = 3, remainder = 1 }
+
+BigInt.fromInt 7 |> BigInt.divModBy (BigInt.fromInt 2)
+--> Just { quotient = 3, modulus = 1 }
+
+-- -7 / 2: a negative dividend
+
+BigInt.fromInt -7 |> BigInt.quotRemBy (BigInt.fromInt 2)
+--> Just { quotient = -3, remainder = -1 }
+
+BigInt.fromInt -7 |> BigInt.divModBy (BigInt.fromInt 2)
+--> Just { quotient = -4, modulus = 1 }
+
+-- 7 / -2: a negative divisor
+
+BigInt.fromInt 7 |> BigInt.quotRemBy (BigInt.fromInt -2)
+--> Just { quotient = -3, remainder = 1 }
+
+BigInt.fromInt 7 |> BigInt.divModBy (BigInt.fromInt -2)
+--> Just { quotient = -4, modulus = -1 }
+```
+
+Both satisfy `divisor * quotient + rest == dividend`. They differ in which
+way the quotient is pushed when it does not come out whole, and that decides
+the sign of what is left over.
+
 Each division also comes as its two halves, `quotBy` and `remainderBy`,
 `divBy` and `modBy`, because most of the time you only want the quotient:
 
@@ -101,11 +135,33 @@ parts of it.
 ### Bits
 
 The bitwise operations treat a value as two's complement of unbounded width.
-`complement (fromInt 5)` is `-6`, and `and (fromInt -6) (fromInt 3)` is `2`.
+A negative number is not a fixed field of bits with the top one set; it is a
+sign bit that repeats forever to the left, written `...` here:
+
+```
+        ...00000101     5
+    ~   ...11111010    -6      complement (fromInt 5)
+
+        ...11111010    -6
+    &   ...00000011     3
+    =   ...00000010     2      and (fromInt -6) (fromInt 3)
+
+        ...11111010    -6
+    |   ...00000011     3
+    =   ...11111011    -5      or (fromInt -6) (fromInt 3)
+
+        ...11111111    -1
+    >>3 ...11111111    -1      shiftRightBy 3 (fromInt -1)
+```
+
 These are the same answers Python gives, and they are the only sensible
 answers when nobody has said how wide the number is. `shiftRightBy` is an
-arithmetic shift, so it floors: `-1` shifted right by any amount is still
-`-1`.
+arithmetic shift, so it floors, and the last line above is why: the ones
+never run out, so `-1` shifted right by any amount is still `-1`.
+
+The bits above are the arithmetic, not the text. `toStringWithBase 2` writes
+a sign and a magnitude, so it prints `-6` as `-110`; the next section says
+how to get the other picture.
 
 ### Strings
 
@@ -118,8 +174,9 @@ sign, and underscores between digits, so `0xdead_beef` parses. Anything it
 does not understand returns `Nothing`, never zero.
 
 `fromStringWithin` is `fromString` for text you did not write. Parsing is
-quadratic in the length of the text, so a million-digit string is a real
-cost, and the plain function will pay it. This one takes a limit on the
+quadratic in the length of the text — [section 6 says
+why](#reading-is-quadratic-in-every-base) — so a million-digit string is a
+real cost, and the plain function will pay it. This one takes a limit on the
 number of digits, refuses anything longer before doing any arithmetic, and
 returns a `Result` so the caller can tell a malformed string from a long one:
 
@@ -234,8 +291,8 @@ structural and cannot be overridden. A type whose `==` disagrees with its
 documentation removes it.
 
 The cost is that the scale no longer records significance. A `BigDecimal`
-does not remember that a price was quoted to the cent. That is a formatting
-question, and you ask it at the edge:
+does not remember that a price was quoted to the cent. Two decimal places is
+a formatting decision, so make it where the value becomes text:
 
 ```gren
 BigDecimal.toStringWithPlaces 2 price   --> "1.50"
@@ -267,26 +324,49 @@ BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3
 
 `Up` and `Down` ignore how close the value was to the boundary. `Ceiling` and
 `Floor` depend on the sign of the number. `HalfUp`, `HalfDown` and `HalfEven`
-all go to the nearer value and differ only on an exact tie. These are the
-rounding modes of Python's `decimal` module under Java's names for them, and
-the test suite checks all seven against Python.
+all go to the nearer value and differ only on an exact tie. The test suite
+checks all seven against Python.
+
+**`Up` and `Down` mean away from zero and toward zero**, not up and down the
+number line. That is Java's vocabulary, and it is the one thing about these
+names worth saying twice, because `Ceiling` and `Floor` are the ones that go
+up and down:
+
+```gren
+roundTo 0 Up      (-2.5)   --> -3     -- away from zero
+roundTo 0 Down    (-2.5)   --> -2     -- toward zero
+roundTo 0 Ceiling (-2.5)   --> -2     -- toward +infinity
+roundTo 0 Floor   (-2.5)   --> -3     -- toward -infinity
+```
+
+The semantics and the names come from different places, deliberately. The
+seven behaviours are Python's `decimal` module's, because that is what the
+tests check against. The names are `java.math.RoundingMode`'s, because
+Python spells the same seven `ROUND_HALF_EVEN` and the prefix is noise inside
+a type already called `Rounding`, while Java's bare words are already
+CamelCase and already familiar from Java, C#, SQL and Python alike.
+
+There is a third set of names. JavaScript's `Intl.NumberFormat` says
+`expand` and `trunc` where Java says `UP` and `DOWN`, and those are the
+clearer words: they say which way the value moves. If you are coming from
+either, here is the mapping:
+
+| here | Python `decimal` | JS `Intl` |
+|---|---|---|
+| `Up` | `ROUND_UP` | `expand` |
+| `Down` | `ROUND_DOWN` | `trunc` |
+| `Ceiling` | `ROUND_CEILING` | `ceil` |
+| `Floor` | `ROUND_FLOOR` | `floor` |
+| `HalfUp` | `ROUND_HALF_UP` | `halfExpand` |
+| `HalfDown` | `ROUND_HALF_DOWN` | `halfTrunc` |
+| `HalfEven` | `ROUND_HALF_EVEN` | `halfEven` |
+
+Python's eighth mode, `ROUND_05UP`, is not here, and neither is Java's
+`UNNECESSARY`: `divBy` returning `Nothing` is what that one is for.
 
 Where this module has to round without being asked, inside
 `toStringWithPlaces`, it uses `HalfEven`. Splitting ties in both directions
 is what keeps a long column of rounded numbers from drifting upward.
-
-### Reading text you did not write
-
-`fromString` does what it is told, and the exponent makes that a hazard:
-`1e-9999999999` is thirteen characters and needs ten billion digits to hold.
-`fromStringWithin` takes a limit on the number of digits the value would take
-to write out, works that number out from the text alone, and returns
-`Err (TooLong { digits, limit })` before building anything:
-
-```gren
-BigDecimal.fromStringWithin 10 "1e-9999999999"
---> Err (BigDecimal.TooLong { digits = 10000000000, limit = 10 })
-```
 
 ### The example that makes the case
 
@@ -305,13 +385,28 @@ language that rounds a `Float` gives `2.67` here and gets blamed for it.
 the number the machine has, and the fact that those differ is the reason to
 have a decimal type at all.
 
+### Reading text you did not write
+
+`fromString` does what it is told, and the exponent makes that a hazard:
+`1e-9999999999` is thirteen characters and needs ten billion digits to hold.
+`fromStringWithin` takes a limit on the number of digits the value would take
+to write out, works that number out from the text alone, and returns
+`Err (TooLong { digits, limit })` before building anything:
+
+```gren
+BigDecimal.fromStringWithin 10 "1e-9999999999"
+--> Err (BigDecimal.TooLong { digits = 10000000000, limit = 10 })
+```
+
 ---
 
 ## 6. How it is built
 
 A `BigInt` is a sign and a magnitude: a `Bool` and an array of 24-bit limbs,
-least significant first. A 64-bit value takes three limbs, and the limbs do
-not line up with the 64 bits, because the value has no width.
+least significant first. Since 24 does not divide 64, a 64-bit value takes
+three limbs: two full ones hold 48 bits and the third holds the remaining 16.
+The array is as long as the number needs and no longer — nothing in it
+records that the value was meant to be 64 bits wide.
 
 ```
 0xDEADBEEFCAFEBABE  =  16045690984503098046
@@ -329,8 +424,9 @@ starts and where the first carry comes from, so growing a number is a
 
 ### Why 24 bits
 
-A limb width has a ceiling and a floor, and there is less room between them
-than you might expect.
+Two constraints bracket the choice: the double's 53-bit significand puts a
+ceiling on the limb width, and decimal conversion puts a floor under it.
+Together they leave three widths to choose between.
 
 The ceiling comes from the double. Three places in the arithmetic need a
 value two limbs wide to be exact: the partial product in `mulByLimb`, the
@@ -432,6 +528,38 @@ Both routes give the same string. The round-trip test writes and re-reads
 each of the eleven sample values in all thirty-five bases, so the two routes
 are held to the same answers.
 
+### Reading is quadratic in every base
+
+Writing has a linear route for four bases. Reading has one for none of them.
+`fromStringWithBase` scans the text once, and then hands the digits to
+Horner's scheme:
+
+```gren
+step char total =
+    add (mul total radix) (fromInt (Maybe.withDefault 0 (digitValue char)))
+```
+
+Multiply the running total by the base, add the next digit, once per digit.
+The multiply is by a single limb, so it costs work proportional to the length
+of the total *so far* rather than a constant: after `k` decimal digits the
+total is about `k / 7.2` limbs long, step `k` walks all of them, and the sum
+over `k = 1..n` is on the order of `n^2 / 2`. A million-digit decimal string is
+some 10^10 limb operations. That is the cost `fromStringWithin` exists to
+refuse, and it can refuse it cheaply because the scan is the linear half:
+`scanDigits` drops the separators and validates the characters in one pass
+and does no arithmetic at all, so the digit count is known before a single
+limb is touched.
+
+The asymmetry with writing is real and not fundamental. Hex is sliced on the
+way out but goes through the multiply-and-add on the way in, even though six
+hex digits are exactly one limb and could be packed straight into place. Nor
+is the constant tight: taking decimal seven digits at a time — accumulate
+them in an `Int`, then one multiply by 10^7 — would cut the work by roughly
+sevenfold while staying quadratic, and only a divide-and-conquer split would
+change the exponent. At the sizes this package is for, neither is worth the
+code, and the ceiling `fromStringWithin` puts on the input is the answer to
+the case where it would be.
+
 ### The arithmetic
 
 Multiplication is long multiplication, one row at a time. Division is Knuth's
@@ -441,15 +569,45 @@ two too high.
 
 ### The decimals on top
 
-`BigDecimal` adds no arithmetic of its own. It is a `BigInt` and an `Int`
-scale, and every operation is a scale adjustment followed by the integer
-operation: `add` widens both operands to the finer scale, `mul` adds the
-scales, and each rounding is one truncating division plus a conditional step
-away from zero. The one piece with any reasoning in it is the test for
-whether an exact division terminates, and it turns out not to need a greatest
-common divisor. Write the divisor as `2^a * 5^b * m`; then `n / d`
-terminates exactly when `d` divides `n * 10^k` for `k = max a b`. Asking for
-that one division both answers the question and produces the digits.
+`BigDecimal` adds no arithmetic of its own. A value is a `BigInt` and a
+scale, and every operation adjusts the scales and then hands the work to
+`BigInt`.
+
+`add` widens both operands to the finer of the two scales, then adds the
+integers. `mul` multiplies the integers and adds the scales:
+
+```
+1.5 + 0.25    ->  150 + 25 = 175, scale 2   ->  1.75
+1.5 * 0.25    ->   15 * 25 = 375, scale 3   ->  0.375
+```
+
+Rounding is one truncating `BigInt` division, followed by a step away from
+zero when the discarded remainder and the mode call for one.
+
+That leaves one question with any real reasoning behind it: how `divBy` knows
+whether an exact quotient exists. A fraction terminates in base ten only when
+the divisor is built from twos and fives, since those are the factors of ten.
+So write the divisor as `2^a * 5^b * m` and let `k` be the larger of `a` and
+`b`. Multiplying the dividend by `10^k` is then the *only* scaling that could
+divide out evenly — a smaller one leaves a two or a five behind, a larger one
+gains nothing — so a single division settles the question:
+
+```
+1 / 8    8 is 2^3        k = 3    1000 / 8 = 125     ->  0.125
+1 / 3    3 is neither    k = 0       1 / 3 leaves 1  ->  Nothing
+```
+
+If it comes out even, the quotient is the answer. If it does not, no other
+scale would have worked either.
+
+None of that is ours. It is Theorem 135 of Hardy and Wright, which says that
+a fraction `p/q` in lowest terms with `q = 2^a * 5^b` terminates after
+exactly `max(a, b)` digits — their `μ` is the `k` above. What the code adds
+is only that it never reduces the fraction first: the theorem wants lowest
+terms, but a factor the dividend shares with the divisor cancels during the
+division anyway, so `3 / 6` comes out as `0.5` with no gcd computed. Java's
+`BigDecimal` uses the same fact from the other side, throwing rather than
+returning when an exact `divide` would not terminate.
 
 ---
 
@@ -488,12 +646,18 @@ one.
 
 **The decimal representation is not ours either.** An unscaled integer and a
 decimal exponent is what `java.math.BigDecimal` is, what Python's `decimal`
-module is, and what IEEE 754-2008 standardised as a decimal format. The seven
-roundings are that standard's, under Java's names. The one choice made here
+module is, and what IEEE 754-2008 standardised as a decimal format. Five of
+the seven roundings are that standard's rounding-direction attributes wearing
+Java's names: `HalfEven` is `roundTiesToEven`, `HalfUp` is `roundTiesToAway`,
+and `Ceiling`, `Floor` and `Down` are the three `roundToward` attributes. The
+other two are nobody's standard. `Up` and `HalfDown` are additions Java and
+Python both make, and a conforming IEEE implementation need not offer either.
+The test for whether an exact division terminates is older than any of them:
+it is Theorem 135 in Hardy and Wright, from 1938. The one choice made here
 rather than inherited is stripping trailing zeroes so that `==` is numeric
 equality, and that is a concession to Gren's structural equality rather than
-an improvement. Java keeps the scale and can afford to, because it gets to
-write its own `equals`.
+an improvement. Java keeps the scale and can
+afford to, because it gets to write its own `equals`.
 
 ### References
 
@@ -502,8 +666,12 @@ write its own `equals`.
 - CPython, [`Include/cpython/longintrepr.h`][cpython]: 30-bit digits, and the
   constraints on `PyLong_SHIFT` that decide them.
 - [bn.js][bnjs]: 26-bit limbs, the same trade on the same doubles.
-- IEEE 754-2008, §3.5: decimal formats as a significand and an exponent, and
-  the rounding-direction attributes.
+- IEEE 754-2008, §3.5 and §4.3: decimal formats as a significand and an
+  exponent, and the five rounding-direction attributes.
+- G. H. Hardy and E. M. Wright, *An Introduction to the Theory of Numbers*,
+  §9.2 "Terminating and recurring decimals", Theorem 135: a reduced `p/q`
+  with `q = 2^a 5^b` terminates after `max(a, b)` digits. That is the test
+  `divBy` performs.
 - Python's [`decimal`][pydecimal] module, which the `Decimals` suite checks
   against.
 
