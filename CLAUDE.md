@@ -27,12 +27,11 @@ devbox run test     # tests/run.sh: 177 checks, ~1s
 ```
 
 Format sources after editing them, especially after scripted edits. The
-formatter is a separate tool and is not part of the devbox environment — there
-is no `gren format` subcommand in 0.6.6:
+formatter is a separate tool:
 
 ```sh
-~/prj/gren-format/gren-format/gren-format.sh src/ tests/src/   # in place
-~/prj/gren-format/gren-format/gren-format.sh --diff src/       # what would change
+gren-format src/              # in place
+gren-format --diff src/       # what would change
 ```
 
 It is idempotent on the sources as committed, so any diff it reports is
