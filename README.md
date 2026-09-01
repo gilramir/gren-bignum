@@ -325,11 +325,10 @@ BigDecimal.one |> BigDecimal.divByTo 5 BigDecimal.HalfEven (BigDecimal.fromInt 3
 
 ### Splitting a total
 
-Dividing answers "what is one share" and answers it for one share at a time,
-which is why the shares stop adding up. Ten pounds in three is `3.33` to the
-cent however it is rounded, and three of those is `9.99`. The missing penny is
-not a rounding to be tuned away -- at two places there is no answer that works
--- so somebody has to be given it.
+Dividing two numbers answers "what is one share". However, consider the
+case of money. `10.00` divided by 3 is `3.33` to the
+cent however it is rounded, and three of those is `9.99`. The missing `0.01` is
+not a rounding to be thrown away. Thus, `allocate`:
 
 ```gren
 BigDecimal.fromString "10.00" |> Maybe.andThen (BigDecimal.allocate 2 3)
@@ -354,9 +353,8 @@ largest-remainder method. Weights are relative, so `[ 1, 1, 2 ]` and
 `[ 25, 25, 50 ]` split alike.
 
 Both refuse a total that is not a whole number of units at that many places,
-rather than rounding it quietly: `allocate 2` will not split `10.005`, because
-a third of a cent is not something to hand anybody. Round it first, and own
-the rounding.
+rather than rounding it quietly: `allocate 2` will not split `10.005`.
+The caller has to round that number first.
 
 ### The seven roundings
 
@@ -403,13 +401,8 @@ Python's eighth mode, `ROUND_05UP`, is not here, and neither is Java's
 `UNNECESSARY`: `divBy` returning `Nothing` is what that one is for.
 
 Where this module has to round without being asked, inside
-`toStringWithPlaces`, it uses `HalfEven`. Splitting ties in both directions is
-what keeps a long column of rounded numbers from drifting upward. A price is
-not a column, though: shops, invoices and most tax authorities round a half
-away from zero, and a total that disagrees with the arithmetic a customer did
-by hand is a support ticket whatever IEEE 754 says. `toStringWithPlacesUsing`
-is the same function with the mode named -- `HalfEven` for a report, `HalfUp`
-for a receipt.
+`toStringWithPlaces`, it uses `HalfEven`.
+`toStringWithPlacesUsing` is the same function with the rounding mode named.
 
 ### The example that makes the case
 

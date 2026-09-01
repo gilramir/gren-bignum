@@ -709,9 +709,8 @@ divByTo places rounding (BigDecimal divisor) (BigDecimal dividend) =
 -- Division answers "what is each share", and answers it for one share at a
 -- time. That is why the shares stop adding up: `10.00 / 3` is `3.33` to the
 -- cent however it is rounded, and three of those is `9.99`. The missing cent
--- is not a rounding error to be tuned away -- there is no answer at two places
--- that works -- so it has to be handed to somebody. Both functions here hand
--- it out and say who got it.
+-- is not a rounding error to be thrown away. `allocate` and `allocateBy`
+-- are for that.
 
 
 {-| Split a total into parts that add back up to it:
@@ -805,10 +804,11 @@ and it is what keeps the parts within one unit of each other's fair share.
         |> Maybe.map (Array.map BigDecimal.toString)
     --> Just [ "0.02", "0.02", "0.01" ]
 
-Equal weights are the same split [`allocate`](#allocate) makes, and it refuses
-the same total that is not a whole number of units. On top of that this one
-refuses weights it cannot read as shares: none at all, a negative one, or a
-set that adds up to nothing.
+Give every weight the same value and you get the split
+[`allocate`](#allocate) makes. Like `allocate`, this refuses a total that is
+not a whole number of units at `places`. It also refuses weights that do not
+describe shares of anything: an empty array, a negative weight, or weights
+that add up to zero.
 
 -}
 allocateBy : Int -> Array BigDecimal -> BigDecimal -> Maybe (Array BigDecimal)
@@ -821,9 +821,10 @@ allocateBy places weights total =
 {-| The total as a whole number of units at `places`, or `Nothing` if it is
 not one.
 
-A scale finer than `places` is the whole test, and it is exact because the
-normal form keeps no trailing zeroes: `500` arrives here as five hundreds and
-splits into hundreds, while `550` does not.
+The whole test is whether the scale is finer than `places`, and nothing more
+is needed because the normal form keeps no trailing zeroes. At `places` of
+`-2`, `500` arrives with a scale of `-2` and splits into hundreds, while `550`
+arrives with a scale of `-1` and is refused.
 
 -}
 unitsAt : Int -> BigDecimal -> Maybe BigInt
