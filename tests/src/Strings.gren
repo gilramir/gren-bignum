@@ -51,6 +51,31 @@ stringsSuite =
                         , decimalOf "-0xDEADBEEF"
                         ]
                     )
+            -- A leading plus is a sign, not a digit and not nonsense. It is
+            -- what a number arrives written as when something else formatted
+            -- it, and every route that reads a sign takes it.
+            , U.test "a leading plus means positive, by every route" <| \_ ->
+                Task.succeed
+                    (Expect.equal [ Just "5", Just "1000", Just "0", Just "255", Just "0" ]
+                        [ decimalOf "+5"
+                        , decimalOf "+1_000"
+                        , decimalOf "+0"
+                        , Maybe.map BigInt.toString (BigInt.fromStringWithBase 16 "+ff")
+                        , Maybe.map BigInt.toString (BigInt.fromStringWithBase 2 "+0")
+                        ]
+                    )
+            , U.test "and the bounded readers count its digits the same" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Ok "255"
+                        , Err (BigInt.TooLong { digits = 3, limit = 2 })
+                        , Ok "57005"
+                        ]
+                        [ within 3 "+2_5_5"
+                        , within 2 "+255"
+                        , BigInt.fromStringWithBaseWithin 16 4 "+dead" |> Result.map BigInt.toString
+                        ]
+                    )
             , U.test "an underscore between two digits is a separator" <| \_ ->
                 Task.succeed
                     (Expect.equal [ Just "3735928559", Just "1000000", Just "1000", Just "255" ]

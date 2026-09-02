@@ -1256,6 +1256,10 @@ powerOfTwo exponent =
 {-| Read a number written the way it would be in source: an optional sign, then
 `0x`, `0b` or `0o` and its digits, or plain decimal.
 
+The sign may be `+` as well as `-`, so a number that arrives written `+5`
+reads as five rather than as nothing. It comes before the prefix, and there
+is at most one of it: `+0xff` is 255, and `++5` and `+ 5` are both `Nothing`.
+
 An underscore between two digits is ignored, so `0xdead_beef` and
 `1_000_000` both parse, and so does `1__000`. An underscore anywhere else is
 not a separator, so `_1`, `1_` and `0x_ff` are `Nothing`.
@@ -1263,6 +1267,8 @@ not a separator, so `_1`, `1_` and `0x_ff` are `Nothing`.
     BigInt.fromString "0b1010" --> Just (BigInt.fromInt 10)
 
     BigInt.fromString "-0xff" --> Just (BigInt.fromInt -255)
+
+    BigInt.fromString "+5" --> Just (BigInt.fromInt 5)
 
     BigInt.fromString "12 apples" --> Nothing
 

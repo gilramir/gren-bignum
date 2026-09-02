@@ -1199,6 +1199,12 @@ somewhere among them, and an optional `e` exponent.
     BigDecimal.fromString "1.5e3" |> Maybe.map BigDecimal.toString
     --> Just "1500"
 
+    BigDecimal.fromString "+2.50" |> Maybe.map BigDecimal.toString
+    --> Just "2.5"
+
+The sign may be `+` as well as `-`, as it may in `BigInt.fromString`, and
+there is at most one of it: `++2.5` and `+ 2.5` are both `Nothing`.
+
 The `e` may be either case and the exponent may carry its own sign, so
 `1.5E-3` is `0.0015` and `1e+5` is `100000`. The exponent is not bounded:
 `1e-9999999999` is accepted, and would take ten billion digits to write. For

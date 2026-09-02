@@ -443,6 +443,21 @@ decimalsSuite =
                         , decimalOf ".5"
                         ]
                     )
+            -- The sign on the mantissa is the one BigInt reads, and a plus
+            -- there means the same as no sign at all -- but only one of it,
+            -- and only up against the digits.
+            , U.test "a leading plus means positive here too" <| \_ ->
+                Task.succeed
+                    (Expect.equal
+                        [ Just "2.5", Just "0.0015", Just "0", Nothing, Nothing, Nothing ]
+                        [ decimalOf "+2.50"
+                        , decimalOf "+1.5E-3"
+                        , decimalOf "+0.0"
+                        , decimalOf "++2.5"
+                        , decimalOf "+ 2.5"
+                        , decimalOf "+"
+                        ]
+                    )
             , U.test "an underscore between two digits is a separator" <| \_ ->
                 Task.succeed
                     (Expect.equal [ Just "1000.0001", Just "1000000", Just "10", Just "10000000000" ]
