@@ -1,0 +1,12 @@
+[package]
+name = "github.com/gilramir/gren-bignum"
+version = "1.0.0"
+summary = "Arbitrary-precision integers and exact decimals, with widths and roundings"
+license = "ISC"
+geng = "0.6.0 <= v < 0.7.0"
+
+[platform]
+runtime = "any"
+
+[modules]
+exposed = ["BigInt", "BigDecimal"]
