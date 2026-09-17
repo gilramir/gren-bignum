@@ -1,7 +1,7 @@
 {
     "type": "package",
     "platform": "common",
-    "name": "gilramir/gren-bignum",
+    "name": "github.com/gilramir/gren-bignum",
     "summary": "Arbitrary-precision integers and exact decimals, with widths and roundings",
     "license": "ISC",
     "version": "1.0.0",
@@ -10,7 +10,5 @@
         "BigDecimal"
     ],
     "gren-version": "0.6.0 <= v < 0.7.0",
-    "dependencies": {
-        "gren-lang/core": "7.4.0 <= v < 8.0.0"
-    }
+    "dependencies": {}
 }
