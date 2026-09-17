@@ -13,6 +13,7 @@ module BigInt exposing
     , fitsUnsigned
     , fromFloat
     , fromInt
+    , fromInt64
     , fromString
     , fromStringWithBase
     , fromStringWithBaseWithin
@@ -39,6 +40,7 @@ module BigInt exposing
     , subBy
     , toFloat
     , toInt
+    , toInt64
     , toSigned
     , toString
     , toStringWithBase
@@ -48,10 +50,11 @@ module BigInt exposing
 
 {-| Integers of any size, and the fixed-width views of them if you need them.
 
-A Gren `Int` is a double, so it is exact up to 2^53 and wrong above that. That
-is fine until you are working out what a `uint64` did, and then it is the
-whole problem: `0xFFFFFFFFFFFFFFFF` is not representable, and what comes back
-instead is `18446744073709552000`, with nothing to say so.
+An `Int` is 32 bits and an `Int64` is 64, and past either one the arithmetic
+wraps. That is fine until you are working out what a `uint64` did plus one, or
+reading a number nobody promised would fit, and then it is the whole problem.
+(On stock Gren an `Int` was a double, exact to 2^53, and `0xFFFFFFFFFFFFFFFF`
+came back as `18446744073709552000`, with nothing to say so.)
 
 A `BigInt` has no width. Instead, it has a way to ask for one:
 
@@ -72,7 +75,7 @@ around and can silently violate.
 
 ## Making them
 
-@docs zero, one, fromInt, toInt, fromFloat, toFloat
+@docs zero, one, fromInt, toInt, fromInt64, toInt64, fromFloat, toFloat
 
 
 ## Reading and writing
@@ -118,7 +121,7 @@ half on its own.
 ## A note on argument order
 
 Wherever the order of the operands matters, the subject comes **last**. This
-matches `Math.modBy`, `Math.remainderBy` and `Bitwise.shiftLeftBy` in core:
+matches `modBy`, `remainderBy` and `Bitwise.shiftLeftBy` in core:
 
     a |> BigInt.subBy one -- a - 1
 
@@ -135,6 +138,7 @@ import Array exposing (Array)
 import Array.Builder as Builder
 import Bitwise
 import Char
+import Int64
 import Math
 import Maybe exposing (Maybe(..))
 import String
@@ -152,8 +156,10 @@ never negative.
 
 Limbs smaller than the range a double holds exactly is the standard way to
 build this. CPython uses 30-bit digits and bn.js uses 26, and the reason is
-multiplication: a limb times a limb plus a carry has to stay under 2^53. What
-is particular here is the 24. It gives up two of bn.js's bits for a different
+multiplication: a limb times a limb plus a carry has to stay under 2^53. On
+Geng that product is done in an `Int64`, where the bound is 2^63, and the limbs
+stayed 24 bits because the 24 was never about the ceiling. What is particular
+here is the 24. It gives up two of bn.js's bits for a different
 property: 24 is divisible by 1, 2, 3 and 4, so binary, octal and hexadecimal
 all land on limb boundaries. One limb is exactly six hex digits, eight octal
 digits, or twenty-four binary digits, so
@@ -168,6 +174,7 @@ reading under which `complement 5` can be `-6` when nobody has said how wide
 the number is.
 
 -}
+@derive(Eq, Inspect)
 type BigInt
     = BigInt
         { negative : Bool
@@ -188,6 +195,11 @@ limbBase =
 limbBaseFloat : Float
 limbBaseFloat =
     16777216
+
+
+limbBase64 : Int64
+limbBase64 =
+    Int64.fromInt limbBase
 
 
 -- CONSTRUCTION
@@ -242,24 +254,39 @@ unwrap (BigInt value) =
     value.limbs
 
 
-{-| An ordinary `Int`. Above 2^53 an `Int` is already inexact, so this
-converts the double you passed, not the number you meant.
+{-| An ordinary `Int`.
 -}
 fromInt : Int -> BigInt
 fromInt n =
-    -- Through `fromFloat` rather than by dividing the `Int` down, because
-    -- `//` cannot be trusted with a quotient this large. See the note under
-    -- MAGNITUDES.
-    Maybe.withDefault zero (fromFloat (Basics.toFloat n))
+    fromInt64 (Int64.fromInt n)
 
 
-{-| Back to an `Int`, when it fits in one exactly, which means no larger than
-`Math.maxSafeInteger`. Anything bigger is `Nothing`, not a number that is
-almost right.
+{-| An `Int64`, every one of them exactly, `Int64.minValue` included.
+-}
+fromInt64 : Int64 -> BigInt
+fromInt64 n =
+    let
+        -- Truncating division keeps the quotient and the remainder on the
+        -- sign of `n`, so the magnitude is read off without ever negating
+        -- `n`, which for `Int64.minValue` would wrap back to itself.
+        go value acc =
+            if value == 0 then
+                acc
+
+            else
+                go (value // limbBase64)
+                    (Array.pushLast (Int64.toInt (Math.abs (Basics.remainderBy limbBase64 value))) acc)
+    in
+    make (n < 0) (go n [])
+
+
+{-| Back to an `Int`, when it fits in one, which means from `-2^31` to
+`2^31 - 1`. Anything outside that is `Nothing`, not a number that is almost
+right.
 -}
 toInt : BigInt -> Maybe Int
 toInt value =
-    if toFloat (abs value) > Basics.toFloat Math.maxSafeInteger then
+    if toFloat value > 2147483647 || toFloat value < -2147483648 then
         Nothing
 
     else
@@ -302,11 +329,46 @@ fromFloat f =
                         -- magnitude, so this loop never drops a bit the double
                         -- still had.
                         rest =
-                            Basics.toFloat (Math.truncate (value / limbBaseFloat))
+                            truncateFloat (value / limbBaseFloat)
                     in
                     go rest (Array.pushLast (Math.truncate (value - rest * limbBaseFloat)) acc)
         in
         Just (make (f < 0) (go (Math.abs f) []))
+
+
+{-| Back to an `Int64`, when it fits in one, which means from `-2^63` to
+`2^63 - 1`.
+-}
+toInt64 : BigInt -> Maybe Int64
+toInt64 (BigInt value) =
+    if not (fitsSigned 64 (BigInt value)) then
+        Nothing
+
+    else
+        let
+            -- A negative value is built downward, so `-2^63` never has to be
+            -- held as a positive number first.
+            step limb acc =
+                if value.negative then
+                    acc * limbBase64 - Int64.fromInt limb
+
+                else
+                    acc * limbBase64 + Int64.fromInt limb
+        in
+        Just (Array.foldr step 0 value.limbs)
+
+
+{-| Truncate toward zero without leaving `Float`. A double of 2^52 or more has
+no fractional part, and one below it fits an `Int64` exactly; `Math.truncate`
+answers an `Int`, which saturates at 2^31.
+-}
+truncateFloat : Float -> Float
+truncateFloat value =
+    if Math.abs value >= 4503599627370496 then
+        value
+
+    else
+        Int64.toFloat (Int64.truncate value)
 
 
 {-| To a `Float`, rounding once the value no longer fits.
@@ -339,14 +401,24 @@ toFloat (BigInt value) =
 -- Everything from here to the next banner works on bare limb arrays:
 -- little-endian, base 2^24, normalized. None of it knows about signs.
 --
--- One platform fact governs all of it. **Gren's `//` truncates its result to
--- 32 bits**: `(2^48) // 2` is 0, and `(2^31) // 1` is -2147483648. It is
--- `(a / b) | 0` underneath, so what has to fit in 32 bits is the *quotient*,
--- not the operands. Every `//` below is therefore on a quotient smaller than
--- 2^25 by construction -- a carry out of a limb, a digit of the answer, an
--- index -- and that is a property to preserve rather than a coincidence. Where
--- a quotient can be large, `Math.truncate (a / b)` is the one that is right at
--- any size.
+-- One platform fact governs all of it. **An `Int` is 32 bits**, and its
+-- arithmetic wraps, so a limb times a limb -- up to 2^48 -- does not fit in
+-- one. Every step that multiplies two limbs, or a limb by the limb base, works
+-- in `Int64` and comes back to `Int` through `splitLimbs` or a quotient that
+-- is known to be under 2^25: a carry out of a limb, a digit of the answer.
+-- Stock Gren's `Int` was a double, where the same steps were exact to 2^53
+-- and only `//` truncated to 32 bits.
+
+
+{-| A value under 2^48 as the carry out of a limb and the limb left behind.
+-}
+splitLimbs : Int64 -> { high : Int, low : Int }
+splitLimbs value =
+    let
+        high =
+            value // limbBase64
+    in
+    { high = Int64.toInt high, low = Int64.toInt (value - high * limbBase64) }
 
 
 limbAt : Int -> Array Int -> Int
@@ -466,12 +538,10 @@ mulByLimb factor limbs =
                 else
                     let
                         product =
-                            limbAt index limbs * factor + carry
-
-                        high =
-                            product // limbBase
+                            splitLimbs
+                                (Int64.fromInt (limbAt index limbs) * Int64.fromInt factor + Int64.fromInt carry)
                     in
-                    go (index + 1) high (Builder.pushLast (product - high * limbBase) acc)
+                    go (index + 1) product.high (Builder.pushLast product.low acc)
         in
         normalize (Builder.toArray (go 0 0 (Builder.empty (len + 1))))
 
@@ -525,12 +595,14 @@ magDivModLimb divisor limbs =
             else
                 let
                     current =
-                        remainder * limbBase + limbAt index limbs
+                        Int64.fromInt remainder * limbBase64 + Int64.fromInt (limbAt index limbs)
 
                     digit =
-                        current // divisor
+                        current // Int64.fromInt divisor
                 in
-                go (index - 1) (current - digit * divisor) (Builder.pushLast digit acc)
+                go (index - 1)
+                    (Int64.toInt (current - digit * Int64.fromInt divisor))
+                    (Builder.pushLast (Int64.toInt digit) acc)
     in
     go (Array.length limbs - 1) 0 (Builder.empty (Array.length limbs))
 
@@ -561,12 +633,10 @@ magShiftLeftBits count limbs =
                 else
                     let
                         value =
-                            limbAt index limbs * multiplier + carry
-
-                        high =
-                            value // limbBase
+                            splitLimbs
+                                (Int64.fromInt (limbAt index limbs) * Int64.fromInt multiplier + Int64.fromInt carry)
                     in
-                    go (index + 1) high (Builder.pushLast (value - high * limbBase) acc)
+                    go (index + 1) value.high (Builder.pushLast value.low acc)
         in
         normalize (Builder.toArray (go 0 0 (Builder.empty (len + 1))))
 
@@ -591,24 +661,26 @@ magShiftRightBits count limbs =
                 else
                     let
                         value =
-                            carry * limbBase + limbAt index limbs
+                            Int64.fromInt carry * limbBase64 + Int64.fromInt (limbAt index limbs)
 
                         digit =
-                            value // divisor
+                            value // Int64.fromInt divisor
                     in
-                    go (index - 1) (value - digit * divisor) (Builder.pushLast digit acc)
+                    go (index - 1)
+                        (Int64.toInt (value - digit * Int64.fromInt divisor))
+                        (Builder.pushLast (Int64.toInt digit) acc)
         in
         go (Array.length limbs - 1) 0 (Builder.empty (Array.length limbs))
 
 
 magShiftLeft : Int -> Array Int -> Array Int
 magShiftLeft count limbs =
-    shiftLimbs (count // limbBits) (magShiftLeftBits (Math.modBy limbBits count) limbs)
+    shiftLimbs (count // limbBits) (magShiftLeftBits (Basics.modBy limbBits count) limbs)
 
 
 magShiftRight : Int -> Array Int -> Array Int
 magShiftRight count limbs =
-    magShiftRightBits (Math.modBy limbBits count) (Array.dropFirst (count // limbBits) limbs)
+    magShiftRightBits (Basics.modBy limbBits count) (Array.dropFirst (count // limbBits) limbs)
 
 
 {-| How many bits one limb uses.
@@ -686,8 +758,10 @@ longDivide dividend divisor =
                     estimate =
                         Basics.min
                             (limbBase - 1)
-                            ((limbAt width current * limbBase + limbAt (width - 1) current)
-                                // limbAt (width - 1) divisor
+                            (Int64.toInt
+                                ((Int64.fromInt (limbAt width current) * limbBase64 + Int64.fromInt (limbAt (width - 1) current))
+                                    // Int64.fromInt (limbAt (width - 1) divisor)
+                                )
                             )
 
                     digit =
@@ -816,7 +890,7 @@ powLoop exponent base acc =
     if exponent == 0 then
         acc
 
-    else if Math.modBy 2 exponent == 1 then
+    else if Basics.modBy 2 exponent == 1 then
         powLoop (exponent - 1) base (mul acc base)
 
     else
@@ -825,7 +899,7 @@ powLoop exponent base acc =
 
 {-| Divide, truncating toward zero, so the remainder takes the sign of the
 dividend: `quotRemBy divisor dividend`. This is C's `/` and `%`, and Gren's own
-`//` and `Math.remainderBy`.
+`//` and `remainderBy`.
 
 `-7 / 2` is `-3` remainder `-1` here.
 
@@ -864,7 +938,7 @@ quotBy divisor dividend =
 
 
 {-| The remainder alone, taking the sign of the dividend:
-`remainderBy divisor dividend`. This is `Math.remainderBy`.
+`remainderBy divisor dividend`. This is `remainderBy`.
 
     BigInt.fromInt -7 |> BigInt.remainderBy (BigInt.fromInt 2)
     --> Just (BigInt.fromInt -1)
@@ -880,7 +954,7 @@ remainderBy divisor dividend =
 
 {-| Divide, flooring, so the modulus takes the sign of the divisor:
 `divModBy divisor dividend`. This is Python's `//` and `%`, and Gren's own
-`Math.modBy`.
+`modBy`.
 
 `-7 / 2` is `-4` modulus `1` here.
 
@@ -918,7 +992,7 @@ divBy divisor dividend =
 
 
 {-| The modulus alone, taking the sign of the divisor: `modBy divisor
-dividend`. This is `Math.modBy`, and it is the one to reach for when the
+dividend`. This is `modBy`, and it is the one to reach for when the
 question is divisibility, because its answer is zero or has the divisor's
 sign and never the dividend's.
 
@@ -1169,7 +1243,7 @@ limbPopCount limb =
         0
 
     else
-        Math.modBy 2 limb + limbPopCount (limb // 2)
+        Basics.modBy 2 limb + limbPopCount (limb // 2)
 
 
 -- WIDTHS
@@ -1690,7 +1764,7 @@ limbToString base value =
         digitChar value
 
     else
-        limbToString base (value // base) ++ digitChar (Math.modBy base value)
+        limbToString base (value // base) ++ digitChar (Basics.modBy base value)
 
 
 digitChar : Int -> String

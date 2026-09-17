@@ -152,6 +152,7 @@ subject comes **last**:
 
 import BigInt exposing (BigInt)
 import Char
+import Int64
 import Math
 import Maybe exposing (Maybe(..))
 import String
@@ -172,6 +173,7 @@ what makes `==` numeric equality. Zero is `unscaled = 0, scale = 0` and nothing
 else, so `x |> subBy x == BigDecimal.zero` is a reliable test.
 
 -}
+@derive(Eq, Inspect)
 type BigDecimal
     = BigDecimal
         { unscaled : BigInt
@@ -297,8 +299,7 @@ at target value =
 
 
 {-| An ordinary `Int`, which is a whole number and so has a scale of zero or
-less. Above 2^53 an `Int` is already inexact, so this converts the double you
-passed, not the number you meant.
+less.
 -}
 fromInt : Int -> BigDecimal
 fromInt n =
@@ -308,8 +309,8 @@ fromInt n =
 {-| Back to an `Int`, when it is a whole number and fits in one exactly.
 
 There are two ways to get `Nothing`, and both are refusals rather than
-roundings: there is a fractional part, or the whole part is past
-`Math.maxSafeInteger`. Apply [`roundTo`](#roundTo) `0` first if you meant to
+roundings: there is a fractional part, or the whole part is outside
+`-2^31` to `2^31 - 1`. Apply [`roundTo`](#roundTo) `0` first if you meant to
 discard the fraction.
 
     BigDecimal.fromString "2.5" |> Maybe.andThen BigDecimal.toInt
@@ -383,7 +384,7 @@ fromFloat f =
             -- reaches a whole number without ever leaving what a double holds
             -- exactly. It runs at most 1074 times, for the smallest subnormal.
             go value count =
-                if value == Basics.toFloat (Math.truncate value) then
+                if Math.abs value >= 4503599627370496 || value == Int64.toFloat (Int64.truncate value) then
                     { value = value, count = count }
 
                 else
@@ -1253,19 +1254,21 @@ a different question.
 fromString : String -> Maybe BigDecimal
 fromString text =
     scan text
-        |> Maybe.map build
+        |> Maybe.andThen build
 
 
 {-| Why [`fromStringWithin`](#fromStringWithin) refused.
 
 `NotANumber` is everything the plain [`fromString`](#fromString) returns
 `Nothing` for. `TooLong` is a well-formed number that would take more digits
-to write out than the limit allows, and it says how many.
+to write out than the limit allows, and it says how many. The count is an
+`Int64` because an exponent can ask for more digits than an `Int` holds, which
+on Geng stops at 2^31 - 1.
 
 -}
 type Error
     = NotANumber
-    | TooLong { digits : Int, limit : Int }
+    | TooLong { digits : Int64, limit : Int }
 
 
 {-| [`fromString`](#fromString) with a ceiling on how many digits the number
@@ -1303,11 +1306,14 @@ fromStringWithin limit text =
                 count =
                     digitsToWrite scanned
             in
-            if count > limit then
+            if count > Int64.fromInt limit then
                 Err (TooLong { digits = count, limit = limit })
 
             else
-                Ok (build scanned)
+                -- Within the limit the scale fits an `Int`, since the count
+                -- is at least the scale's size, so `build` answers.
+                build scanned
+                    |> Result.fromMaybe NotANumber
     in
     scan text
         |> Result.fromMaybe NotANumber
@@ -1319,7 +1325,7 @@ with the point and any separators removed, the scale those digits sit at
 once the exponent is applied, and the sign. No arithmetic has happened yet.
 -}
 type alias Scanned =
-    { negative : Bool, digits : String, scale : Int }
+    { negative : Bool, digits : String, scale : Int64 }
 
 
 scan : String -> Maybe Scanned
@@ -1337,7 +1343,7 @@ scan text =
                 scanMantissa mantissa 0
 
             [ mantissa, exponent ] ->
-                String.toInt exponent
+                parseExponent exponent
                     |> Maybe.andThen (scanMantissa mantissa)
 
             _ ->
@@ -1348,7 +1354,7 @@ scan text =
 the point, which is a subtraction from the scale and no arithmetic on the
 digits.
 -}
-scanMantissa : String -> Int -> Maybe Scanned
+scanMantissa : String -> Int64 -> Maybe Scanned
 scanMantissa text exponent =
     let
         body =
@@ -1369,7 +1375,7 @@ scanMantissa text exponent =
                 Just
                     { negative = negative
                     , digits = whole ++ fraction
-                    , scale = String.count fraction - exponent
+                    , scale = Int64.fromInt (String.count fraction) - exponent
                     }
     in
     when String.split "." body is
@@ -1383,21 +1389,74 @@ scanMantissa text exponent =
             Nothing
 
 
-build : Scanned -> BigDecimal
+{-| The value a scan describes, when its scale is an `Int`. On Geng an `Int` is
+32 bits, so an exponent that moves the point further than that makes a number
+this package cannot hold, where stock Gren's 53-bit `Int` could.
+-}
+build : Scanned -> Maybe BigDecimal
 build scanned =
     let
         magnitude =
             BigInt.fromStringWithBase 10 scanned.digits
                 |> Maybe.withDefault BigInt.zero
     in
-    make
-        (if scanned.negative then
-            BigInt.negate magnitude
+    Int64.toIntChecked scanned.scale
+        |> Maybe.map
+            (make
+                (if scanned.negative then
+                    BigInt.negate magnitude
 
-         else
+                 else
+                    magnitude
+                )
+            )
+
+
+{-| The exponent after an `e`: an optional sign and decimal digits. It is an
+`Int64` so a count of digits past an `Int` can still be reported. One of more
+than fifteen digits is held at a quadrillion, which is still past any limit an
+`Int` can give and leaves the arithmetic on it room.
+-}
+parseExponent : String -> Maybe Int64
+parseExponent text =
+    let
+        negative =
+            String.startsWith "-" text
+
+        digits =
+            if negative || String.startsWith "+" text then
+                String.dropFirst 1 text
+
+            else
+                text
+
+        cap =
+            1000000000000000
+
+        magnitude =
+            String.foldl
+                (\char acc ->
+                    Maybe.map2
+                        (\sofar digit -> Basics.min cap (sofar * 10 + Int64.fromInt digit))
+                        acc
+                        (String.toInt (String.fromChar char))
+                )
+                (Just 0)
+                digits
+    in
+    if String.isEmpty digits || not (String.all Char.isDigit digits) then
+        Nothing
+
+    else
+        Maybe.map
+            (\m ->
+                if negative then
+                    Basics.negate m
+
+                else
+                    m
+            )
             magnitude
-        )
-        scanned.scale
 
 
 {-| How many digits [`toString`](#toString) writes for a scanned number,
@@ -1411,7 +1470,7 @@ the point and either `m - s` before it or a single `0`, so `max m (s + 1)`.
 Zero is one digit.
 
 -}
-digitsToWrite : Scanned -> Int
+digitsToWrite : Scanned -> Int64
 digitsToWrite scanned =
     let
         significant =
@@ -1426,10 +1485,10 @@ digitsToWrite scanned =
                 String.count significant - String.count (trimLeadingZeroes (String.reverse significant))
 
             m =
-                String.count significant - trailing
+                Int64.fromInt (String.count significant - trailing)
 
             s =
-                scanned.scale - trailing
+                scanned.scale - Int64.fromInt trailing
         in
         if s <= 0 then
             m - s

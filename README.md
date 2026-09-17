@@ -16,6 +16,15 @@ BigDecimal.fromString "0.1"
     --> Just "0.3"
 ```
 
+**On Geng.** This is the `geng` branch, the port to
+[Geng](https://github.com/gilramir/geng-lang)'s core, where an `Int` is a
+32-bit integer and `Int64`, `UInt32` and `UInt64` are types of their own. The
+API is the same plus `BigInt.fromInt64` and `BigInt.toInt64`; `toInt` refuses
+what a 32-bit `Int` cannot hold; the limb arithmetic multiplies in `Int64`; and
+`BigDecimal.TooLong` counts digits in an `Int64`. The rest of this README is the
+stock Gren design, and its reasoning about doubles is what it was written
+against. The test suite passes 208 of 208 on Geng, as the stock version does on Gren.
+
 **TL;DR.** A Gren `Int` is a stored in a JavaScript double floating-point,
 so it is exactup to 2^53 and wrong above that, and Gren's `//`
 operator is wrong far sooner than that. `BigInt` is an integer with no

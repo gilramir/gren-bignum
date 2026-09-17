@@ -179,11 +179,13 @@ bigNumbersSuite =
                     )
             , U.test "toInt stops exactly at the safe integers" <| \_ ->
                 Task.succeed
-                    (Expect.equal [ Just Math.maxSafeInteger, Nothing, Just (Basics.negate Math.maxSafeInteger), Nothing ]
-                        [ BigInt.toInt (BigInt.fromInt Math.maxSafeInteger)
-                        , BigInt.toInt (BigInt.fromInt Math.maxSafeInteger |> BigInt.add BigInt.one)
-                        , BigInt.toInt (BigInt.fromInt (Basics.negate Math.maxSafeInteger))
-                        , BigInt.toInt (BigInt.fromInt (Basics.negate Math.maxSafeInteger) |> BigInt.subBy BigInt.one)
+                    -- An `Int` is 32 bits on Geng, so the edges are its own, where stock
+                    -- Gren's were `Math.maxSafeInteger`.
+                    (Expect.equal [ Just 2147483647, Nothing, Just -2147483648, Nothing ]
+                        [ BigInt.toInt (BigInt.fromInt 2147483647)
+                        , BigInt.toInt (BigInt.fromInt 2147483647 |> BigInt.add BigInt.one)
+                        , BigInt.toInt (BigInt.fromInt -2147483648)
+                        , BigInt.toInt (BigInt.fromInt -2147483648 |> BigInt.subBy BigInt.one)
                         ]
                     )
             , U.test "toFloat past a double's range is an infinity" <| \_ ->

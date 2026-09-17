@@ -29,20 +29,25 @@ import Decimals exposing (decimalsSuite)
 import Differential exposing (differentialSuite)
 import Node
 import Strings exposing (stringsSuite)
+import Task exposing (Task)
 import Test.Runner.UnitNode as U
 
 
-main : Node.SimpleProgram a
+main : Task Never {}
 main =
-    U.run
-        { name = "gren-bignum"
-        , version = "1.0.0"
-        , suites =
-            [ differentialSuite
-            , bigNumbersSuite
-            , bitsSuite
-            , stringsSuite
-            , decimalsSuite
-            , cartSuite
-            ]
-        }
+    Node.getEnvironment
+        |> Task.andThen
+            (\env ->
+                U.run env
+                    { name = "gren-bignum"
+                    , version = "1.0.0"
+                    , suites =
+                        [ differentialSuite
+                        , bigNumbersSuite
+                        , bitsSuite
+                        , stringsSuite
+                        , decimalsSuite
+                        , cartSuite
+                        ]
+                    }
+            )

@@ -39,6 +39,13 @@ something new that has drifted from the house style.
 
 ## The platform fact that governs the implementation
 
+**On the `geng` branch** an `Int` is 32 bits and wraps, and the section below is
+the stock Gren fact the code was first written against. Here, every step that
+multiplies two limbs or a limb by the base goes through `Int64` (`splitLimbs`,
+`magDivModLimb`, `magShiftRightBits`, `longDivide`'s estimate), and a `Float`
+is truncated with `truncateFloat` because `Math.truncate` saturates at 2^31.
+The differential suite's judge is `Int64`. Build and test with `geng`.
+
 **Gren's `//` truncates its result to 32 bits.** It is `(a / b) | 0`
 underneath, so `(2^48) // 2` is `0` and `(2^31) // 1` is `-2147483648`. What
 has to fit in 32 bits is the *quotient*, not the operands.

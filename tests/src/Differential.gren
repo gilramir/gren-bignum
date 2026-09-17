@@ -3,8 +3,8 @@ module Differential exposing (differentialSuite)
 {-| The cheapest way to be sure of an arbitrary-precision integer: do the same
 sums twice.
 
-Every pair of small integers goes through both `BigInt` and Gren's own `Int`,
-and the answers have to match. Small numbers are where the interesting bugs
+Every pair of small integers goes through both `BigInt` and `Int64`, and the
+answers have to match. Small numbers are where the interesting bugs
 are -- signs, zero, the boundary where a magnitude cancels -- and there are
 enough pairs here that a wrong sign anywhere shows up as forty failures rather
 than as a lucky pass.
@@ -13,18 +13,13 @@ The limb boundary is the other half. Base 2^24 means the carries that matter
 happen at 16777216, and no amount of testing near zero goes near them, so the
 same comparison is run over pairs straddling that.
 
-Two things about the big pairs are worth knowing, because both of them made
-this file wrong before they made it right.
-
-`Int` can only be the judge of an answer it can hold, so the pairs used for
-multiplication are kept small enough that their products stay under 2^53.
-
-And the division there is checked against `Math.truncate (a / b)` rather than
-against `//`, because **Gren's `//` truncates its result to 32 bits**:
-`(2^48) // 2` is `0`, and `(2^31) // 1` is `-2147483648`. It is `(a / b) | 0`
-underneath, so it is the quotient and not the operands that has to fit. The
-small pairs above still use `//` -- there it is both correct and the thing
-anyone would actually compare against.
+The judge is `Int64` and not `Int`, because an `Int` is 32 bits and the
+boundary pairs reach 2^48. `Int64` can only be the judge of an answer it can
+hold, so the pairs used for multiplication are kept small enough that their
+products stay under 2^63. (Stock Gren's judge was an `Int` that was a double,
+where the bound was 2^53 and `//` truncated its quotient to 32 bits, so the
+boundary division was checked against `Math.truncate (a / b)`. An `Int64`'s
+`//` is exact, and the file uses it throughout.)
 
 @docs differentialSuite
 
@@ -33,6 +28,7 @@ anyone would actually compare against.
 import Array exposing (Array)
 import BigInt exposing (BigInt)
 import Expect
+import Int64
 import Math
 import String
 import Task
@@ -55,7 +51,7 @@ differentialSuite =
                 Task.succeed (expectNoMismatch (binary small "-" (\a b -> Just (a - b)) (\a b -> Just (a |> BigInt.subBy b))))
             , U.test "mul matches Int" <| \_ ->
                 Task.succeed (expectNoMismatch (binary small "*" (\a b -> Just (a * b)) (\a b -> Just (BigInt.mul a b))))
-            -- Gren's `//` truncates toward zero and `Math.modBy` floors, which
+            -- Gren's `//` truncates toward zero and `modBy` floors, which
             -- is exactly the split between the two division functions. If
             -- either is wired to the wrong one, half of these pairs say so.
             , U.test "quotRemBy quotient matches Int's //" <| \_ ->
@@ -67,12 +63,12 @@ differentialSuite =
                             (\a b -> a |> BigInt.quotRemBy b |> Maybe.map .quotient)
                         )
                     )
-            , U.test "quotRemBy remainder matches Math.remainderBy" <| \_ ->
+            , U.test "quotRemBy remainder matches Basics.remainderBy" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
                         (binary nonZero
                             "rem"
-                            (\a b -> Just (Math.remainderBy b a))
+                            (\a b -> Just (remainderBy b a))
                             (\a b -> a |> BigInt.quotRemBy b |> Maybe.map .remainder)
                         )
                     )
@@ -81,16 +77,16 @@ differentialSuite =
                     (expectNoMismatch
                         (binary nonZero
                             "div"
-                            (\a b -> Just ((a - Math.modBy b a) // b))
+                            (\a b -> Just ((a - modBy b a) // b))
                             (\a b -> a |> BigInt.divModBy b |> Maybe.map .quotient)
                         )
                     )
-            , U.test "divModBy modulus matches Math.modBy" <| \_ ->
+            , U.test "divModBy modulus matches Basics.modBy" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
                         (binary nonZero
                             "mod"
-                            (\a b -> Just (Math.modBy b a))
+                            (\a b -> Just (modBy b a))
                             (\a b -> a |> BigInt.divModBy b |> Maybe.map .modulus)
                         )
                     )
@@ -106,20 +102,20 @@ differentialSuite =
                     (expectNoMismatch
                         (binary nonZero "//" (\a b -> Just (a // b)) (\a b -> a |> BigInt.quotBy b))
                     )
-            , U.test "remainderBy matches Math.remainderBy" <| \_ ->
+            , U.test "remainderBy matches Basics.remainderBy" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (binary nonZero "rem" (\a b -> Just (Math.remainderBy b a)) (\a b -> a |> BigInt.remainderBy b))
+                        (binary nonZero "rem" (\a b -> Just (remainderBy b a)) (\a b -> a |> BigInt.remainderBy b))
                     )
             , U.test "divBy is the flooring quotient" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (binary nonZero "div" (\a b -> Just ((a - Math.modBy b a) // b)) (\a b -> a |> BigInt.divBy b))
+                        (binary nonZero "div" (\a b -> Just ((a - modBy b a) // b)) (\a b -> a |> BigInt.divBy b))
                     )
-            , U.test "modBy matches Math.modBy" <| \_ ->
+            , U.test "modBy matches Basics.modBy" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (binary nonZero "mod" (\a b -> Just (Math.modBy b a)) (\a b -> a |> BigInt.modBy b))
+                        (binary nonZero "mod" (\a b -> Just (modBy b a)) (\a b -> a |> BigInt.modBy b))
                     )
             -- Parity reads one bit of one limb rather than dividing, so the
             -- way for it to be wrong is to read the wrong limb -- which every
@@ -130,12 +126,12 @@ differentialSuite =
             , U.test "isEven matches Int, across the limb boundary" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (predicate "isEven" (\n -> Math.modBy 2 n == 0) BigInt.isEven)
+                        (predicate "isEven" (\n -> modBy 2 n == 0) BigInt.isEven)
                     )
             , U.test "isOdd is its negation everywhere" <| \_ ->
                 Task.succeed
                     (expectNoMismatch
-                        (predicate "isOdd" (\n -> Math.modBy 2 n /= 0) BigInt.isOdd)
+                        (predicate "isOdd" (\n -> modBy 2 n /= 0) BigInt.isOdd)
                     )
             , U.test "compare matches Int's" <| \_ ->
                 Task.succeed (expectNoMismatch (ordering small))
@@ -151,7 +147,7 @@ differentialSuite =
                     (expectNoMismatch
                         (binary (Array.keepIf (\pair -> pair.b /= 0) modest)
                             "//"
-                            (\a b -> Just (Math.truncate (Basics.toFloat a / Basics.toFloat b)))
+                            (\a b -> Just (a // b))
                             (\a b -> a |> BigInt.quotRemBy b |> Maybe.map .quotient)
                         )
                     )
@@ -208,7 +204,7 @@ differentialSuite =
                     (expectNoMismatch
                         (binary (Array.keepIf (\pair -> pair.b /= 0) modest)
                             "div"
-                            (\a b -> Just ((a - Math.modBy b a) // b))
+                            (\a b -> Just ((a - modBy b a) // b))
                             (\a b -> a |> BigInt.divModBy b |> Maybe.map .quotient)
                         )
                     )
@@ -217,14 +213,19 @@ differentialSuite =
 
 
 type alias Pair =
-    { a : Int, b : Int }
+    { a : Int64, b : Int64 }
 
 
 {-| Every pair in -24 to 24: zero, both signs, and the crossings between them.
 -}
 small : Array Pair
 small =
-    cross (Array.range -24 24) (Array.range -24 24)
+    cross smallRange smallRange
+
+
+smallRange : Array Int64
+smallRange =
+    Array.map Int64.fromInt (Array.range -24 24)
 
 
 nonZero : Array Pair
@@ -258,8 +259,8 @@ boundary =
     cross interesting interesting
 
 
-{-| The same idea, kept small enough that `Int` can still be the judge:
-products stay under 2^50, well inside a double's exact range.
+{-| The same idea, kept small enough that `Int64` can still be the judge:
+products stay under 2^50.
 -}
 modest : Array Pair
 modest =
@@ -284,10 +285,10 @@ modest =
 both signs, and the limb boundaries where reading the wrong limb stops being
 invisible.
 -}
-singles : Array Int
+singles : Array Int64
 singles =
     Array.flatten
-        [ Array.range -24 24
+        [ smallRange
         , [ 16777215
           , 16777216
           , 16777217
@@ -302,21 +303,21 @@ singles =
         ]
 
 
-predicate : String -> (Int -> Bool) -> (BigInt -> Bool) -> Array String
+predicate : String -> (Int64 -> Bool) -> (BigInt -> Bool) -> Array String
 predicate name native big =
     singles
         |> Array.mapAndKeepJust
             (\n ->
-                if native n == big (BigInt.fromInt n) then
+                if native n == big (BigInt.fromInt64 n) then
                     Nothing
 
                 else
                     Just
                         (name
                             ++ " "
-                            ++ String.fromInt n
+                            ++ String.fromInt64 n
                             ++ " gave "
-                            ++ (if big (BigInt.fromInt n) then
+                            ++ (if big (BigInt.fromInt64 n) then
                                     "True"
 
                                 else
@@ -326,7 +327,7 @@ predicate name native big =
             )
 
 
-cross : Array Int -> Array Int -> Array Pair
+cross : Array Int64 -> Array Int64 -> Array Pair
 cross xs ys =
     Array.mapAndFlatten (\a -> Array.map (\b -> { a = a, b = b }) ys) xs
 
@@ -338,7 +339,7 @@ report and "-3 + 0 gave 3" is.
 binary :
     Array Pair
     -> String
-    -> (Int -> Int -> Maybe Int)
+    -> (Int64 -> Int64 -> Maybe Int64)
     -> (BigInt -> BigInt -> Maybe BigInt)
     -> Array String
 binary pairs name native big =
@@ -350,8 +351,8 @@ binary pairs name native big =
                         native pair.a pair.b
 
                     actual =
-                        big (BigInt.fromInt pair.a) (BigInt.fromInt pair.b)
-                            |> Maybe.andThen BigInt.toInt
+                        big (BigInt.fromInt64 pair.a) (BigInt.fromInt64 pair.b)
+                            |> Maybe.andThen BigInt.toInt64
                 in
                 if expected == actual then
                     Nothing
@@ -369,14 +370,14 @@ binary pairs name native big =
 
 describe : Pair -> String -> String
 describe pair name =
-    String.fromInt pair.a ++ " " ++ name ++ " " ++ String.fromInt pair.b
+    String.fromInt64 pair.a ++ " " ++ name ++ " " ++ String.fromInt64 pair.b
 
 
-show : Maybe Int -> String
+show : Maybe Int64 -> String
 show value =
     when value is
         Just n ->
-            String.fromInt n
+            String.fromInt64 n
 
         Nothing ->
             "nothing"
@@ -387,7 +388,7 @@ expectNoMismatch failures =
     Expect.equal [] (Array.takeFirst 8 failures)
 
 
-unary : String -> (Int -> Int) -> (BigInt -> BigInt) -> Array String
+unary : String -> (Int64 -> Int64) -> (BigInt -> BigInt) -> Array String
 unary name native big =
     singles
         |> Array.mapAndKeepJust
@@ -397,7 +398,7 @@ unary name native big =
                         Just (native n)
 
                     actual =
-                        BigInt.toInt (big (BigInt.fromInt n))
+                        BigInt.toInt64 (big (BigInt.fromInt64 n))
                 in
                 if expected == actual then
                     Nothing
@@ -406,7 +407,7 @@ unary name native big =
                     Just
                         (name
                             ++ " "
-                            ++ String.fromInt n
+                            ++ String.fromInt64 n
                             ++ ": expected "
                             ++ show expected
                             ++ " but got "
@@ -420,7 +421,7 @@ ordering pairs =
     pairs
         |> Array.mapAndKeepJust
             (\pair ->
-                if Basics.compare pair.a pair.b == BigInt.compare (BigInt.fromInt pair.a) (BigInt.fromInt pair.b) then
+                if Basics.compare pair.a pair.b == BigInt.compare (BigInt.fromInt64 pair.a) (BigInt.fromInt64 pair.b) then
                     Nothing
 
                 else
