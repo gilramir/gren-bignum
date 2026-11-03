@@ -14,5 +14,6 @@ runtime = "node"
 "github.com/geng-language/node" = { path = "../../../gren-lang/node" }
 "github.com/geng-language/test" = { path = "../../../gren-lang/test" }
 "github.com/gilramir/gren-argparse" = { path = "../../gren-argparse" }
+"github.com/gilramir/gren-argparse/node" = { path = "../../gren-argparse/node" }
 "github.com/geng-language/stream" = { path = "../../../../packages/stream" }
 "github.com/geng-language/url" = { path = "../../../../packages/url" }
